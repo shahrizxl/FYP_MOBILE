@@ -1,0 +1,42 @@
+name: smartbudget
+description: "A new Flutter project."
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.11.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  supabase_flutter: ^2.0.0
+  http: ^1.2.0
+  intl: ^0.19.0
+  fl_chart: ^0.68.0
+  speech_to_text: ^7.3.0
+  app_links: ^6.0.0
+  flutter_local_notifications: ^17.2.1
+  timezone: ^0.9.4
+  shared_preferences: ^2.2.3
+  cupertino_icons: ^1.0.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_launcher_icons: ^0.13.1
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+
+  # ✅ FIX: This tells Flutter to bundle your images into the release APK
+  assets:
+    - assets/icon/
+    # Add your images folder if you use one on your login screen!
+    # - assets/images/ 
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/icon/SmartBudget.png"
