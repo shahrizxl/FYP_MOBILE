@@ -306,7 +306,7 @@ class _CategoryBreakdownPageState extends State<CategoryBreakdownPage> {
     setState(() {
       usingDefaultFromNeeds = true;
       monthlyBudget = needs;
-      budgetCtrl.text = monthlyBudget.toStringAsFixed(0);
+      budgetCtrl.text = monthlyBudget.toStringAsFixed(2);
       _resetAllTargetsToZero();
       isEditing = true;
     });
@@ -363,7 +363,7 @@ class _CategoryBreakdownPageState extends State<CategoryBreakdownPage> {
           usingDefaultFromNeeds = false;
 
           monthlyBudget = _asDouble(budRes['monthly_budget']);
-          budgetCtrl.text = monthlyBudget <= 0 ? "" : monthlyBudget.toStringAsFixed(0);
+          budgetCtrl.text = monthlyBudget <= 0 ? "" : monthlyBudget.toStringAsFixed(2);
 
           final rawP = budRes['percents'];
           final Map<String, dynamic> pm = (rawP is Map<String, dynamic>) ? rawP : <String, dynamic>{};
@@ -752,7 +752,7 @@ class _CategoryBreakdownPageState extends State<CategoryBreakdownPage> {
                                   padding: const EdgeInsets.only(top: 8, left: 4),
                                   child: Text(
                                     income > 0
-                                        ? "Using Default (50% of RM ${income.toStringAsFixed(0)} income)"
+                                        ? "Using Default (50% of RM ${income.toStringAsFixed(2)} income)"
                                         : "Using Fallback (Needs budget)",
                                     style: TextStyle(
                                       fontSize: 12,
@@ -1036,7 +1036,7 @@ class _CategoryBreakdownPageState extends State<CategoryBreakdownPage> {
         color: _colorForCat(e.key),
         value: v,
         radius: isTouched ? maxRadius + 10 : maxRadius,
-        title: (pct > 6 || isTouched) ? "${pct.toStringAsFixed(0)}%" : "",
+        title: (pct > 6 || isTouched) ? "${pct.toStringAsFixed(2)}%" : "",
         titleStyle: TextStyle(
           fontWeight: FontWeight.bold,
           fontSize: isTouched ? 13 : 12,

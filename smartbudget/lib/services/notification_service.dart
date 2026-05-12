@@ -16,17 +16,16 @@ class NotificationService {
 
   bool _initialized = false;
 
-  // Anti-spam (per app session) for INSTANT alerts only (popup notif)
-  final Set<int> _shownIds = {};
 
-  // ===== Notification IDs =====
-  static const int _dailyId = 1001;
+  // ===== Notification IDs (Spaced to avoid collisions) =====
   static const int _testId = 999;
+  static const int _dailyId = 1001;
   static const int _monthStartId = 2001;
   static const int _monthEndId = 2002;
   static const int _salaryId = 2003;
+  static const int _predictOverId = 2004;
 
-  // ===== SharedPreferences Keys (MUST match your UserSettingsPage) =====
+  // ===== SharedPreferences Keys =====
   static const String _kReminderOn = "daily_reminder_on";
   static const String _kReminderHour = "daily_reminder_hour";
   static const String _kReminderMinute = "daily_reminder_minute";
@@ -89,36 +88,47 @@ class NotificationService {
     return const NotificationDetails(android: android, iOS: ios);
   }
 
-  /// Logs ONCE in Supabase (no duplicates) + shows local notification (anti-spam per session)
-  Future<void> _notifyOnce({
-    required int id,
-    required String notiKey, // unique key for NotificationPage
-    required String title,
-    required String body,
-    String type = "info",
-  }) async {
-    // 1) Always log to Supabase
-    try {
-      await NotificationLogService.instance.createOnce(
-        notiKey: notiKey,
-        title: title,
-        body: body,
-        type: type,
-      );
-    } catch (_) {
-      // ignore logging errors
-    }
+final Set<int> _shownIds = {};
 
-    // 2) Show local notification (mobile only)
-    if (kIsWeb) return;
+// ==============================
+// UPDATED NOTIFICATION FUNCTION
+// ==============================
 
-    // session anti-spam for popup
-    if (_shownIds.contains(id)) return;
+Future<void> _notifyOnce({
+  required int id,
+  required String notiKey,
+  required String title,
+  required String body,
+  String type = "info",
+}) async {
+  // 1) Always log to Supabase
+  try {
+    await NotificationLogService.instance.createOnce(
+      notiKey: notiKey,
+      title: title,
+      body: body,
+      type: type,
+    );
+  } catch (_) {}
 
-    await init();
-    await _plugin.show(id, title, body, _details());
-    _shownIds.add(id);
-  }
+  // 2) Stop for web
+  if (kIsWeb) return;
+
+  // ✅ ONLY session anti-spam
+  if (_shownIds.contains(id)) return;
+
+  await init();
+
+  await _plugin.show(
+    id,
+    title,
+    body,
+    _details(),
+  );
+
+  // ✅ ONLY session tracking (NOT permanent)
+  _shownIds.add(id);
+}
 
   Future<bool> _exactAlarmsAllowed() async {
     if (kIsWeb) return false;
@@ -180,7 +190,7 @@ class NotificationService {
   }
 
   // ==============================
-  // EDGE-TRIGGER HELPERS (persist across app restarts)
+  // EDGE-TRIGGER HELPERS & CLEANUP
   // ==============================
   Future<int> _getIntPref(String key, {int def = 0}) async {
     final prefs = await SharedPreferences.getInstance();
@@ -190,6 +200,21 @@ class NotificationService {
   Future<void> _setIntPref(String key, int value) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt(key, value);
+  }
+
+  /// Cleans up old budget state keys from SharedPreferences to prevent bloat
+  Future<void> _cleanupOldBudgetKeys() async {
+    final prefs = await SharedPreferences.getInstance();
+    final now = DateTime.now();
+    final currentPeriod = _periodKey(now.year, now.month);
+    
+    final keys = prefs.getKeys();
+    for (final key in keys) {
+      if ((key.startsWith('budget_state-') || key.startsWith('predict_over_state-')) &&
+          !key.contains(currentPeriod)) {
+        await prefs.remove(key);
+      }
+    }
   }
 
   // ==============================
@@ -202,6 +227,9 @@ class NotificationService {
   }) async {
     if (kIsWeb) return;
     await init();
+
+    // Clean up old keys to keep SharedPreferences light
+    await _cleanupOldBudgetKeys();
 
     final pending = await _plugin.pendingNotificationRequests();
     final pendingIds = pending.map((p) => p.id).toSet();
@@ -304,7 +332,7 @@ class NotificationService {
   // ==============================
   // BUDGET ALERTS (period aware + EDGE TRIGGERED)
   // ==============================
-  int _stableIdFromString(String s, {int base = 3000, int mod = 600}) {
+  int _stableIdFromString(String s, {required int base, required int mod}) {
     int h = 0;
     for (final code in s.codeUnits) {
       h = (h * 31 + code) & 0x7fffffff;
@@ -323,13 +351,11 @@ class NotificationService {
   }) async {
     if (budget <= 0) return;
 
-    // prevents Feb budget being used for March alerts
     if (!_isCurrentMonth(budgetYear, budgetMonth)) return;
 
     final period = _periodKey(budgetYear, budgetMonth);
     final catKey = category.trim().toLowerCase().replaceAll(' ', '_');
 
-    // 0 = below 80%, 1 = >=80% and <100%, 2 = exceeded
     int newState = 0;
     if (spent >= budget) {
       newState = 2;
@@ -340,20 +366,18 @@ class NotificationService {
     final stateKey = "budget_state-$period-$catKey";
     final oldState = await _getIntPref(stateKey, def: 0);
 
-    // ✅ If it dropped, update stored state (reset) and do NOT notify
     if (newState < oldState) {
       await _setIntPref(stateKey, newState);
       return;
     }
 
-    // ✅ If same state, do nothing
     if (newState == oldState) return;
 
-    // ✅ If crossed upward, store then notify once
     await _setIntPref(stateKey, newState);
 
-    final id80 = _stableIdFromString("80_${period}_$catKey", base: 3000);
-    final idEx = _stableIdFromString("ex_${period}_$catKey", base: 3600);
+    // Separated ranges: 3000-3999 for 80%, 4000-4999 for Exceeded
+    final id80 = _stableIdFromString("80_${period}_$catKey", base: 3000, mod: 1000);
+    final idEx = _stableIdFromString("ex_${period}_$catKey", base: 4000, mod: 1000);
     
     if (newState == 1) {
       await _notifyOnce(
@@ -377,8 +401,6 @@ class NotificationService {
   // ==============================
   // PREDICTION WARNING (period aware + EDGE TRIGGERED)
   // ==============================
-  /// ✅ Only alerts if the budget belongs to the CURRENT month.
-  /// ✅ Edge-triggered: if becomes safe again, resets so it can pop later.
   Future<void> safeSpendingWarning({
     required double predicted,
     required double monthlyBudget,
@@ -387,24 +409,20 @@ class NotificationService {
   }) async {
     if (monthlyBudget <= 0) return;
 
-    // prevents Feb budget being used for March prediction warning
     if (!_isCurrentMonth(budgetYear, budgetMonth)) return;
 
     final period = _periodKey(budgetYear, budgetMonth);
     final key = "predict_over_state-$period";
 
     final isOver = predicted > monthlyBudget;
-
-    // old: 0 = not over, 1 = over
     final old = await _getIntPref(key, def: 0);
     final nowState = isOver ? 1 : 0;
 
-    // became over now (0 -> 1), notify once
     if (old == 0 && nowState == 1) {
       await _setIntPref(key, 1);
 
       await _notifyOnce(
-        id: 3003,
+        id: _predictOverId,
         notiKey: "predict-overbudget-$period",
         title: "📉 Overspending Risk",
         body: "At this pace you may overspend this month.",
@@ -413,7 +431,6 @@ class NotificationService {
       return;
     }
 
-    // if it goes back safe, reset so it can pop again later
     if (old == 1 && nowState == 0) {
       await _setIntPref(key, 0);
     }
@@ -474,7 +491,8 @@ class NotificationService {
       androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
       uiLocalNotificationDateInterpretation:
           UILocalNotificationDateInterpretation.absoluteTime,
-      matchDateTimeComponents: DateTimeComponents.dayOfMonthAndTime,
+      // Removed matchDateTimeComponents to prevent endless repeating on clamped days like the 28th.
+      // ensureScheduled() will correctly queue up the next one next month.
     );
   }
 
@@ -505,7 +523,6 @@ class NotificationService {
   // STREAK (EDGE TRIGGERED)
   // ==============================
   Future<void> checkStreak(int streak) async {
-    // Pop only when crossing to 7+ (resets if streak drops below 7)
     const key = "streak7_state";
     final old = await _getIntPref(key, def: 0);
     final nowState = (streak >= 7) ? 1 : 0;
@@ -513,7 +530,7 @@ class NotificationService {
     if (old == 0 && nowState == 1) {
       await _setIntPref(key, 1);
       await _notifyOnce(
-        id: 4001,
+        id: 5001,
         notiKey: "streak-7",
         title: "🔥 7 Day Streak!",
         body: "You're building financial discipline 💪",
@@ -531,7 +548,6 @@ class NotificationService {
   // INACTIVE (EDGE TRIGGERED)
   // ==============================
   Future<void> checkInactive(int daysInactive) async {
-    // Buckets: 0, 3, 7, 14
     int bucket = 0;
     if (daysInactive >= 14) {
       bucket = 14;
@@ -544,22 +560,19 @@ class NotificationService {
     const key = "inactive_bucket_state";
     final oldBucket = await _getIntPref(key, def: 0);
 
-    // If bucket drops, reset (no popup on decrease)
     if (bucket < oldBucket) {
       await _setIntPref(key, bucket);
       return;
     }
 
-    // Same bucket = no popup
     if (bucket == oldBucket) return;
 
-    // Bucket increased: store + popup
     await _setIntPref(key, bucket);
 
     if (bucket == 0) return;
 
     await _notifyOnce(
-      id: 4002,
+      id: 5002, // Kept out of the 4000s collision zone
       notiKey: "inactive-$bucket",
       title: "👋 We Miss You",
       body: "You haven’t logged expenses for $daysInactive days.",
@@ -571,7 +584,6 @@ class NotificationService {
   // SAVING MILESTONE (EDGE TRIGGERED)
   // ==============================
   Future<void> checkSavingMilestone(double totalSavings) async {
-    // Level: 0 <1000, 1 >=1000, 2 >=5000, 3 >=10000
     int level = 0;
     if (totalSavings >= 10000) {
       level = 3;
@@ -584,21 +596,18 @@ class NotificationService {
     const key = "savings_milestone_level";
     final oldLevel = await _getIntPref(key, def: 0);
 
-    // If savings drop, reset level (no popup on decrease)
     if (level < oldLevel) {
       await _setIntPref(key, level);
       return;
     }
 
-    // Same level = no popup
     if (level == oldLevel) return;
 
-    // Level increased: store + popup
     await _setIntPref(key, level);
 
     if (level == 3) {
       await _notifyOnce(
-        id: 5003,
+        id: 6003,
         notiKey: "milestone-10000",
         title: "🏆 Financial Beast!",
         body: "RM10,000 saved!",
@@ -609,7 +618,7 @@ class NotificationService {
 
     if (level == 2) {
       await _notifyOnce(
-        id: 5002,
+        id: 6002,
         notiKey: "milestone-5000",
         title: "🚀 Big Achievement!",
         body: "Savings reached RM5,000!",
@@ -620,7 +629,7 @@ class NotificationService {
 
     if (level == 1) {
       await _notifyOnce(
-        id: 5001,
+        id: 6001,
         notiKey: "milestone-1000",
         title: "🎉 Savings Milestone!",
         body: "You reached RM1,000!",
@@ -644,21 +653,7 @@ class NotificationService {
   }) async {
     final due = dueDate.toLocal();
 
-    final notiKey =
-        "pp-rem-$plannedPaymentId-${due.year}-${due.month}-${due.day}-$remindDaysBefore";
-
-    // Always log
-    try {
-      await NotificationLogService.instance.createOnce(
-        notiKey: notiKey,
-        title: "⏰ Planned payment reminder",
-        body: "$title • RM${amount.toStringAsFixed(2)} ($category)",
-        type: "info",
-      );
-    } catch (_) {}
-
     if (kIsWeb) return;
-
     await init();
 
     var remindAt = tz.TZDateTime(
@@ -676,8 +671,14 @@ class NotificationService {
     }
 
     final exactOk = await _exactAlarmsAllowed();
+    
+    // Range: 9000 - 10999
     final id =
-        _stableIdFromString("pp_rem_$plannedPaymentId", base: 8000, mod: 1500);
+        _stableIdFromString("pp_rem_$plannedPaymentId", base: 9000, mod: 2000);
+
+    // NOTE: Supabase immediate logging has been removed here.
+    // If you log it here, it will show up instantly in your UI instead of next week.
+    // Log this event only when the payment actually fires or via a backend cron job.
 
     await _plugin.zonedSchedule(
       id,
@@ -700,9 +701,11 @@ class NotificationService {
     await init();
 
     final id =
-        _stableIdFromString("pp_rem_$plannedPaymentId", base: 8000, mod: 1500);
+        _stableIdFromString("pp_rem_$plannedPaymentId", base: 9000, mod: 2000);
     await _plugin.cancel(id);
-    _shownIds.remove(id);
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove("shown_$id");
   }
 
   Future<void> plannedPaymentPosted({
@@ -711,8 +714,9 @@ class NotificationService {
     required double amount,
     required String category,
   }) async {
+    // Range: 7000 - 8999
     final id =
-        _stableIdFromString("pp_post_$plannedPaymentId", base: 7000, mod: 1500);
+        _stableIdFromString("pp_post_$plannedPaymentId", base: 7000, mod: 2000);
 
     await _notifyOnce(
       id: id,
@@ -736,7 +740,14 @@ class NotificationService {
     if (kIsWeb) return;
     await init();
     await _plugin.cancelAll();
-    _shownIds.clear();
+
+    final prefs = await SharedPreferences.getInstance();
+    final keys = prefs.getKeys();
+    for (final key in keys) {
+      if (key.startsWith("shown_")) {
+        await prefs.remove(key);
+      }
+}
   }
 
   // ==============================

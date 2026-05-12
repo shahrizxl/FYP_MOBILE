@@ -190,7 +190,7 @@ class _SavingGoalsPageState extends State<SavingGoalsPage> {
             final target = _readMoney(targetCtrl.text);
             final current = _readMoney(currentCtrl.text);
             final pct = (target <= 0) ? 0.0 : (current / target).clamp(0.0, 1.0);
-            final pctText = "${(pct * 100).toStringAsFixed(0)}%";
+            final pctText = "${(pct * 100).toStringAsFixed(2)}%";
             final remaining = (target - current);
             final remainingSafe = remaining < 0 ? 0.0 : remaining;
 
@@ -514,7 +514,7 @@ class _HeroSummaryCard extends StatelessWidget {
     final t = Theme.of(context);
     final cs = t.colorScheme;
 
-    final pctText = "${(overallPct * 100).toStringAsFixed(0)}%";
+    final pctText = "${(overallPct * 100).toStringAsFixed(2)}%";
 
     // Use subtle elevation in dark mode to avoid “too bright gradient”
     final isDark = t.brightness == Brightness.dark;
@@ -725,7 +725,7 @@ class _GoalCardNiceV2 extends StatelessWidget {
     final t = Theme.of(context);
     final cs = t.colorScheme;
 
-    final pctText = "${(pct * 100).toStringAsFixed(0)}%";
+    final pctText = "${(pct * 100).toStringAsFixed(2)}%";
     final done = pct >= 1.0;
 
     final accentBg = done ? cs.tertiaryContainer : cs.secondaryContainer;

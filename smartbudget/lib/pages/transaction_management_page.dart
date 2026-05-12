@@ -4,6 +4,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../services/transaction_service.dart';
 import 'add_transaction_page.dart';
+import '../services/globals.dart';
 
 class TransactionManagementPage extends StatefulWidget {
   const TransactionManagementPage({super.key});
@@ -127,13 +128,22 @@ class _TransactionManagementPageState extends State<TransactionManagementPage> {
   @override
   void initState() {
     super.initState();
+
+    globalTransactionUpdateNotifier.addListener(_onGlobalTxUpdate);
+
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await loadTx();
     });
   }
 
+  Future<void> _onGlobalTxUpdate() async {
+    if (!mounted) return;
+    await loadTx();
+  }
+
   @override
   void dispose() {
+    globalTransactionUpdateNotifier.removeListener(_onGlobalTxUpdate);
     searchCtrl.dispose();
     super.dispose();
   }
@@ -193,6 +203,9 @@ class _TransactionManagementPageState extends State<TransactionManagementPage> {
       });
 
       await txService.deleteTransaction(t['id']);
+
+      globalTransactionUpdateNotifier.value++;
+
       if (!mounted) return;
       
       ScaffoldMessenger.of(context).showSnackBar(
@@ -565,7 +578,7 @@ class _SummaryHero extends StatelessWidget {
                         ],
                       ),
                       const SizedBox(height: 4),
-                      Text("RM ${income.toStringAsFixed(0)}", style: TextStyle(color: cs.onPrimary, fontSize: 16, fontWeight: FontWeight.bold)),
+                      Text("RM ${income.toStringAsFixed(2)}", style: TextStyle(color: cs.onPrimary, fontSize: 16, fontWeight: FontWeight.bold)),
                     ],
                   ),
                 ),
@@ -586,7 +599,7 @@ class _SummaryHero extends StatelessWidget {
                         ],
                       ),
                       const SizedBox(height: 4),
-                      Text("RM ${expense.toStringAsFixed(0)}", style: TextStyle(color: cs.onPrimary, fontSize: 16, fontWeight: FontWeight.bold)),
+                      Text("RM ${expense.toStringAsFixed(2)}", style: TextStyle(color: cs.onPrimary, fontSize: 16, fontWeight: FontWeight.bold)),
                     ],
                   ),
                 ),

@@ -5,6 +5,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'category_breakdown_page.dart';
 import 'saving_goals_page.dart';
 import 'planned_payments_page.dart';
+import '../services/globals.dart';
 
 class MorePage extends StatefulWidget {
   const MorePage({super.key});
@@ -101,9 +102,23 @@ class _MorePageState extends State<MorePage> {
   @override
   void initState() {
     super.initState();
+
+    globalTransactionUpdateNotifier.addListener(_onGlobalTxUpdate);
+
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await loadTx();
     });
+  }
+
+  Future<void> _onGlobalTxUpdate() async {
+    if (!mounted) return;
+    await loadTx();
+  }
+
+  @override
+  void dispose() {
+    globalTransactionUpdateNotifier.removeListener(_onGlobalTxUpdate);
+    super.dispose();
   }
 
   @override

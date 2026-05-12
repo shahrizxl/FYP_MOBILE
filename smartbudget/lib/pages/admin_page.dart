@@ -512,7 +512,7 @@ class _UserAdminCard extends StatelessWidget {
                 children: [
                   _StatPill(icon: Icons.receipt_long_rounded, label: "Transactions", value: "$txCount"),
                   const SizedBox(width: 12),
-                  _StatPill(icon: Icons.payments_rounded, label: "Total Spend", value: "RM ${totalSpend.toStringAsFixed(0)}"),
+                  _StatPill(icon: Icons.payments_rounded, label: "Total Spend", value: "RM ${totalSpend.toStringAsFixed(2)}"),
                 ],
               ),
             ),

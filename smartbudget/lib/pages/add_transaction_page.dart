@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-
+import '../services/globals.dart';
 // Assuming this is your service, left intact:
 import '../services/transaction_service.dart';
 
@@ -255,6 +255,8 @@ class _AddTransactionPageState extends State<AddTransactionPage> {
           category: selectedCategory,
         );
       }
+
+      globalTransactionUpdateNotifier.value++;
 
       if (!mounted) return;
       Navigator.pop(context, true);

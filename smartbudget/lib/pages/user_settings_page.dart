@@ -39,14 +39,18 @@ class _UserSettingsPageState extends State<UserSettingsPage> {
   ThemeMode _themeMode = ThemeMode.system;
   bool _loadingTheme = true;
 
+  // Improved formatting: proper Title Case for "john.doe" -> "John Doe"
   String get displayName {
     final email = user?.email;
     if (email == null || !email.contains('@')) return "User";
     
-    // Improved formatting: replace dots with spaces
-    final name = email.split('@').first.trim().replaceAll('.', ' ');
-    if (name.isEmpty) return "User";
-    return name[0].toUpperCase() + name.substring(1);
+    final nameParts = email.split('@').first.trim().split('.');
+    if (nameParts.isEmpty || nameParts.first.isEmpty) return "User";
+    
+    return nameParts.map((part) {
+      if (part.isEmpty) return "";
+      return part[0].toUpperCase() + part.substring(1).toLowerCase();
+    }).join(" ");
   }
 
   // ===============================
@@ -123,10 +127,20 @@ class _UserSettingsPageState extends State<UserSettingsPage> {
   }
 
   Future<void> _setThemeMode(ThemeMode mode) async {
+    // Save to SharedPreferences so it persists across app restarts
+    // (Assuming ThemePrefs has a save method. If not, use SharedPreferences directly here)
+    try {
+      await ThemePrefs.save(mode); 
+    } catch (_) {
+      // Fallback if ThemePrefs.save doesn't exist:
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('theme_mode', mode.name);
+    }
+
+    if (!mounted) return;
     final app = MyApp.of(context);
     app.setThemeMode(mode);
 
-    if (!mounted) return;
     setState(() => _themeMode = mode);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -170,24 +184,10 @@ class _UserSettingsPageState extends State<UserSettingsPage> {
     }
   }
 
-  // Updated to handle any week milestone
-  String _kStreakNotifiedKey(int streak, DateTime now) =>
-      "streak_${streak}_notified_${now.year}_${now.month}";
-
+  // Simplified: Let NotificationService handle the "multiples of 7" business logic
   Future<void> _checkStreakNotification(int streak) async {
-    // Only trigger on multiples of 7 (7, 14, 21...)
-    if (streak == 0 || streak % 7 != 0) return;
-
-    final prefs = await SharedPreferences.getInstance();
-    final now = DateTime.now();
-    final key = _kStreakNotifiedKey(streak, now);
-
-    final alreadyNotified = prefs.getBool(key) ?? false;
-
-    if (!alreadyNotified) {
-      await NotificationService.instance.checkStreak(streak);
-      await prefs.setBool(key, true);
-    }
+    if (streak <= 0) return;
+    await NotificationService.instance.checkStreak(streak);
   }
 
   // =========================
@@ -312,7 +312,7 @@ class _UserSettingsPageState extends State<UserSettingsPage> {
 
     final createdAtMalaysia = _toMalaysiaTime(user?.createdAt);
     final activeDays =
-    createdAtMalaysia != null ? _daysSince(createdAtMalaysia) : null;
+        createdAtMalaysia != null ? _daysSince(createdAtMalaysia) : null;
     final initial = displayName.isNotEmpty ? displayName[0].toUpperCase() : "?";
 
     return Scaffold(

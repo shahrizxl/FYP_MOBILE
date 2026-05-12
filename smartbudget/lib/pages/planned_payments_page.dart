@@ -693,13 +693,13 @@ class _PlannedHeroCard extends StatelessWidget {
     required this.remaining,
   });
 
-  String _money(double v) => v.toStringAsFixed(0);
+  String _money(double v) => v.toStringAsFixed(2);
 
   @override
   Widget build(BuildContext context) {
     final t = Theme.of(context);
     final cs = t.colorScheme;
-    final pctText = (pct * 100).toStringAsFixed(0);
+    final pctText = (pct * 100).toStringAsFixed(2);
 
     return Container(
       padding: const EdgeInsets.all(24),

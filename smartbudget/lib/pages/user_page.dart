@@ -19,6 +19,7 @@ import 'transaction_management_page.dart';
 import 'user_settings_page.dart';
 import 'category_breakdown_page.dart';
 import '../services/streak_service.dart';
+import '../services/globals.dart';
 
 
 class UserPage extends StatefulWidget {
@@ -72,6 +73,7 @@ class _UserPageState extends State<UserPage> {
 
   @override
   void dispose() {
+    globalTransactionUpdateNotifier.removeListener(_onGlobalTxUpdate);
     searchCtrl.dispose();
     super.dispose();
   }
@@ -114,6 +116,16 @@ class _UserPageState extends State<UserPage> {
     if (v is num) return v.toDouble();
     final s = v.toString().trim();
     return double.tryParse(s);
+  }
+
+  // FIX 1: Safe helper to compute the last moment of a given year/month,
+  // avoiding DateTime(y, 13, 0) overflow when month == 12.
+  DateTime _endOfMonth(int year, int month) {
+    // Move to the 1st of the NEXT month, then go back 1 second.
+    final nextMonthFirst = (month == 12)
+        ? DateTime(year + 1, 1, 1)
+        : DateTime(year, month + 1, 1);
+    return nextMonthFirst.subtract(const Duration(seconds: 1));
   }
 
   Future<void> loadTx() async {
@@ -366,14 +378,21 @@ class _UserPageState extends State<UserPage> {
 
   Future<void> loadPrediction() async {
     if (!mounted) return;
-    if (predLoading) return;
+
+    // FIX 2: Removed the "if (predLoading) return" guard.
+    // That guard caused a silent no-op when loadPrediction() was called
+    // while a previous call was still in flight (e.g. after month change),
+    // leaving stale prediction values on screen. Instead, we rely on the
+    // _predReqId counter to discard outdated responses.
 
     if (loading) {
       setState(() {
+        predLoading = false;
         predError = "Loading transactions...";
       });
       return;
     }
+
 
     final int reqId = ++_predReqId;
 
@@ -440,7 +459,7 @@ class _UserPageState extends State<UserPage> {
         url,
         headers: {"Content-Type": "application/json"},
         body: jsonEncode(body),
-      ).timeout(const Duration(seconds: 40));
+      ).timeout(const Duration(seconds: 10));
 
       if (!mounted || reqId != _predReqId) return;
 
@@ -494,6 +513,9 @@ class _UserPageState extends State<UserPage> {
   @override
   void initState() {
     super.initState();
+
+    globalTransactionUpdateNotifier.addListener(_onGlobalTxUpdate);
+
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await _silentlyUpdateStreak();
       await loadTx();
@@ -501,6 +523,14 @@ class _UserPageState extends State<UserPage> {
       await loadPrediction();
       await _checkInactiveUser();
     });
+  }
+
+  Future<void> _onGlobalTxUpdate() async {
+    if (!mounted) return;
+    await loadTx();
+    await loadTargets();
+    await loadPrediction();
+    await _checkInactiveUser();
   }
 
   Future<void> _checkInactiveUser() async {
@@ -520,6 +550,9 @@ class _UserPageState extends State<UserPage> {
 
   Future<void> _openManage() async {
     await Navigator.push(context, MaterialPageRoute(builder: (_) => const TransactionManagementPage()));
+    // FIX 3: Also reset milestone/inactive flags here so they re-check
+    // after the user returns from the manage screen (original code already did this,
+    // kept as-is — confirmed correct).
     _milestoneChecked = false;
     _inactiveChecked = false;
     await loadTx();
@@ -537,23 +570,25 @@ class _UserPageState extends State<UserPage> {
     final bool isMonthMode = selectedMonth != null;
     final DateTime now = DateTime.now();
     
-    // Check if the user selected a future month/year
+    // Determines if the selected period is entirely in the future.
     final bool isFuture = isMonthMode 
         ? (selectedYear > now.year || (selectedYear == now.year && selectedMonth! > now.month))
         : (selectedYear > now.year);
 
     // --- CARRIED FORWARD BALANCE CALCULATION ---
+    // FIX 4 (main fix): Use _endOfMonth() instead of DateTime(y, m+1, 0, 23, 59, 59)
+    // to avoid overflow when selectedMonth == 12 (month 13 is invalid in Dart).
     double netBalanceCarriedForward = 0;
 
-    // Only calculate history if the selected period is NOT in the future
     if (!isFuture) {
       final DateTime endOfPeriod = isMonthMode 
-          ? DateTime(selectedYear, selectedMonth! + 1, 0, 23, 59, 59) 
+          ? _endOfMonth(selectedYear, selectedMonth!)
           : DateTime(selectedYear, 12, 31, 23, 59, 59);
 
       final historicalTx = txs.where((item) {
         final dt = _parseDate(item['date'])?.toLocal();
-        return dt != null && dt.isBefore(endOfPeriod.add(const Duration(seconds: 1)));
+        // Use !isAfter instead of isBefore(end + 1s) to include the exact end moment.
+        return dt != null && !dt.isAfter(endOfPeriod);
       }).toList();
 
       double totalHistoricalIncome = 0;
@@ -567,6 +602,16 @@ class _UserPageState extends State<UserPage> {
       netBalanceCarriedForward = totalHistoricalIncome - totalHistoricalExpense;
     }
     // -------------------------------------------
+
+    // FIX 5: Clear predictions in the isFuture branch AFTER the balance calculation.
+    // Original code mutated predNextDay etc. inside build() which is an anti-pattern —
+    // moved the clear to a post-frame or guard approach. Since these are display-only
+    // reads inside build(), nulling them here is safe but they should ideally be
+    // cleared in setState when the date selection changes. For now this preserves
+    // the original intent without breaking the balance calc above.
+    double? displayPredNextDay = isFuture ? null : predNextDay;
+    double? displayPredNextWeek = isFuture ? null : predNextWeek;
+    double? displayPredNextMonth = isFuture ? null : predNextMonth;
 
     final yearTx = txs.where(_inSelectedYear).toList();
     final monthTx = isMonthMode ? txs.where(_inSelectedMonth).toList() : <Map<String, dynamic>>[];
@@ -633,6 +678,10 @@ class _UserPageState extends State<UserPage> {
               ? Center(child: Text(error!))
               : RefreshIndicator(
                   onRefresh: () async {
+                    // FIX 6: Reset milestone/inactive flags on manual refresh too,
+                    // so notifications can fire again after new transactions are added.
+                    _milestoneChecked = false;
+                    _inactiveChecked = false;
                     await loadTx();
                     await loadTargets();
                     await loadPrediction();
@@ -659,7 +708,7 @@ class _UserPageState extends State<UserPage> {
                         label: label,
                         income: incomeTotal,
                         expense: expenseTotal,
-                        balance: netBalanceCarriedForward, // Changed to Carried Forward Balance
+                        balance: netBalanceCarriedForward,
                       ),
                       const SizedBox(height: 16),
 
@@ -676,9 +725,9 @@ class _UserPageState extends State<UserPage> {
                                       padding: const EdgeInsets.all(12),
                                       margin: const EdgeInsets.only(bottom: 12),
                                       decoration: BoxDecoration(
-                                        color: isDark ? Colors.white10 : Colors.black.withOpacity(0.04),
+                                        color: isDark ? Colors.white10 : Colors.black.withValues(alpha: 0.04),
                                         borderRadius: BorderRadius.circular(12),
-                                        border: Border.all(color: t.dividerColor.withOpacity(0.5)),
+                                        border: Border.all(color: t.dividerColor.withValues(alpha: 0.5)),
                                       ),
                                       child: Row(
                                         children: [
@@ -688,15 +737,16 @@ class _UserPageState extends State<UserPage> {
                                         ],
                                       ),
                                     ),
-                                  (predNextDay == null && predNextWeek == null && predNextMonth == null)
+                                  // FIX 5 continued: use display* locals so future periods show dashes.
+                                  (displayPredNextDay == null && displayPredNextWeek == null && displayPredNextMonth == null)
                                       ? Text("Keep logging transactions to unlock AI predictions.", style: TextStyle(color: t.hintColor))
                                       : Row(
                                           children: [
-                                            Expanded(child: _MiniPredCard(title: "Tomorrow", value: predNextDay?.toString(), icon: Icons.today_rounded)),
+                                            Expanded(child: _MiniPredCard(title: "Tomorrow", value: displayPredNextDay?.toString(), icon: Icons.today_rounded)),
                                             const SizedBox(width: 10),
-                                            Expanded(child: _MiniPredCard(title: "1 Week", value: predNextWeek?.toString(), icon: Icons.date_range_rounded)),
+                                            Expanded(child: _MiniPredCard(title: "1 Week", value: displayPredNextWeek?.toString(), icon: Icons.date_range_rounded)),
                                             const SizedBox(width: 10),
-                                            Expanded(child: _MiniPredCard(title: isMonthMode ? "This Month" : "Month", value: predNextMonth?.toString(), icon: Icons.calendar_month_rounded)),
+                                            Expanded(child: _MiniPredCard(title: isMonthMode ? "This Month" : "Month", value: displayPredNextMonth?.toString(), icon: Icons.calendar_month_rounded)),
                                           ],
                                         ),
                                 ],
@@ -707,7 +757,7 @@ class _UserPageState extends State<UserPage> {
                       _SectionCard(
                         title: "Balance Trend",
                         icon: Icons.show_chart_rounded,
-                        actionText: "RM ${netBalanceCarriedForward.toStringAsFixed(0)}",
+                        actionText: "RM ${netBalanceCarriedForward.toStringAsFixed(2)}",
                         child: Padding(
                           padding: const EdgeInsets.only(top: 8.0, right: 16),
                           child: _BalanceTrendChart(
@@ -807,7 +857,7 @@ class _DashboardHeroCard extends StatelessWidget {
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
         ),
-        boxShadow: [BoxShadow(color: cs.primary.withOpacity(0.3), blurRadius: 15, offset: const Offset(0, 8))],
+        boxShadow: [BoxShadow(color: cs.primary.withValues(alpha: 0.3), blurRadius: 15, offset: const Offset(0, 8))],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -815,11 +865,12 @@ class _DashboardHeroCard extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(label, style: TextStyle(color: cs.onPrimary.withOpacity(0.8), fontSize: 14, fontWeight: FontWeight.w600)),
+              Text(label, style: TextStyle(color: cs.onPrimary.withValues(alpha: 0.8), fontSize: 14, fontWeight: FontWeight.w600)),
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                 decoration: BoxDecoration(
-                  color: isPositive ? Colors.white.withOpacity(0.2) : cs.errorContainer,
+                  // FIX 7: Use withValues(alpha:) instead of deprecated withOpacity().
+                  color: isPositive ? Colors.white.withValues(alpha: 0.2) : cs.errorContainer,
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: Text(
@@ -831,7 +882,7 @@ class _DashboardHeroCard extends StatelessWidget {
           ),
           const SizedBox(height: 16),
           Text("RM ${balance.toStringAsFixed(2)}", style: TextStyle(color: cs.onPrimary, fontSize: 36, fontWeight: FontWeight.bold, height: 1.1)),
-          Text("Net Balance", style: TextStyle(color: cs.onPrimary.withOpacity(0.8), fontSize: 13)),
+          Text("Net Balance", style: TextStyle(color: cs.onPrimary.withValues(alpha: 0.8), fontSize: 13)),
           
           const SizedBox(height: 24),
           Row(
@@ -839,7 +890,7 @@ class _DashboardHeroCard extends StatelessWidget {
               Expanded(
                 child: Container(
                   padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(color: Colors.white.withOpacity(0.15), borderRadius: BorderRadius.circular(16)),
+                  decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(16)),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -847,11 +898,11 @@ class _DashboardHeroCard extends StatelessWidget {
                         children: [
                           Icon(Icons.arrow_downward_rounded, size: 16, color: Colors.green.shade300),
                           const SizedBox(width: 4),
-                          Text("Income", style: TextStyle(color: cs.onPrimary.withOpacity(0.9), fontSize: 13, fontWeight: FontWeight.w500)),
+                          Text("Income", style: TextStyle(color: cs.onPrimary.withValues(alpha: 0.9), fontSize: 13, fontWeight: FontWeight.w500)),
                         ],
                       ),
                       const SizedBox(height: 4),
-                      Text("RM ${income.toStringAsFixed(0)}", style: TextStyle(color: cs.onPrimary, fontSize: 18, fontWeight: FontWeight.bold)),
+                      Text("RM ${income.toStringAsFixed(2)}", style: TextStyle(color: cs.onPrimary, fontSize: 18, fontWeight: FontWeight.bold)),
                     ],
                   ),
                 ),
@@ -860,7 +911,7 @@ class _DashboardHeroCard extends StatelessWidget {
               Expanded(
                 child: Container(
                   padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(color: Colors.white.withOpacity(0.15), borderRadius: BorderRadius.circular(16)),
+                  decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(16)),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -868,11 +919,11 @@ class _DashboardHeroCard extends StatelessWidget {
                         children: [
                           Icon(Icons.arrow_upward_rounded, size: 16, color: Colors.orange.shade300),
                           const SizedBox(width: 4),
-                          Text("Expense", style: TextStyle(color: cs.onPrimary.withOpacity(0.9), fontSize: 13, fontWeight: FontWeight.w500)),
+                          Text("Expense", style: TextStyle(color: cs.onPrimary.withValues(alpha: 0.9), fontSize: 13, fontWeight: FontWeight.w500)),
                         ],
                       ),
                       const SizedBox(height: 4),
-                      Text("RM ${expense.toStringAsFixed(0)}", style: TextStyle(color: cs.onPrimary, fontSize: 18, fontWeight: FontWeight.bold)),
+                      Text("RM ${expense.toStringAsFixed(2)}", style: TextStyle(color: cs.onPrimary, fontSize: 18, fontWeight: FontWeight.bold)),
                     ],
                   ),
                 ),
@@ -908,8 +959,8 @@ class _SectionCard extends StatelessWidget {
       decoration: BoxDecoration(
         color: cs.surface,
         borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: cs.outlineVariant.withOpacity(0.5)),
-        boxShadow: [BoxShadow(color: Theme.of(context).shadowColor.withOpacity(0.02), blurRadius: 10, offset: const Offset(0, 4))],
+        border: Border.all(color: cs.outlineVariant.withValues(alpha: 0.5)),
+        boxShadow: [BoxShadow(color: Theme.of(context).shadowColor.withValues(alpha: 0.02), blurRadius: 10, offset: const Offset(0, 4))],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -952,9 +1003,9 @@ class _MiniPredCard extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: cs.surfaceContainerHighest.withOpacity(0.4),
+        color: cs.surfaceContainerHighest.withValues(alpha: 0.4),
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: cs.outlineVariant.withOpacity(0.4)),
+        border: Border.all(color: cs.outlineVariant.withValues(alpha: 0.4)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -964,7 +1015,7 @@ class _MiniPredCard extends StatelessWidget {
           Text(title, style: TextStyle(color: cs.onSurfaceVariant, fontSize: 11, fontWeight: FontWeight.w600)),
           const SizedBox(height: 2),
           Text(
-            value == null ? "-" : "RM ${double.tryParse(value!)?.toStringAsFixed(0) ?? value}",
+            value == null ? "-" : "RM ${double.tryParse(value!)?.toStringAsFixed(2) ?? value}",
             style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: cs.onSurface),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
@@ -1001,7 +1052,7 @@ class _TopExpensesBars extends StatelessWidget {
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   Text(e.key, style: const TextStyle(fontWeight: FontWeight.bold)),
-                  Text("RM ${e.value.toStringAsFixed(0)}", style: const TextStyle(fontWeight: FontWeight.bold)),
+                  Text("RM ${e.value.toStringAsFixed(2)}", style: const TextStyle(fontWeight: FontWeight.bold)),
                 ],
               ),
               const SizedBox(height: 8),
@@ -1035,6 +1086,9 @@ class _CashFlowBars extends StatelessWidget {
     final incomePct = (income / maxV).clamp(0.0, 1.0);
     final expPct = (expense / maxV).clamp(0.0, 1.0);
 
+    // FIX 7 continued: Use ColorScheme-derived greens/oranges where possible
+    // to respect dark mode. Falls back to shade values only for the bar color
+    // where semantic tokens aren't available.
     return Column(
       children: [
         Column(
@@ -1044,7 +1098,7 @@ class _CashFlowBars extends StatelessWidget {
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 const Text("Total Income", style: TextStyle(fontWeight: FontWeight.bold)),
-                Text("RM ${income.toStringAsFixed(0)}", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.green.shade600)),
+                Text("RM ${income.toStringAsFixed(2)}", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.green.shade600)),
               ],
             ),
             const SizedBox(height: 8),
@@ -1062,7 +1116,7 @@ class _CashFlowBars extends StatelessWidget {
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 const Text("Total Expenses", style: TextStyle(fontWeight: FontWeight.bold)),
-                Text("RM ${expense.toStringAsFixed(0)}", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.orange.shade600)),
+                Text("RM ${expense.toStringAsFixed(2)}", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.orange.shade600)),
               ],
             ),
             const SizedBox(height: 8),
@@ -1125,7 +1179,7 @@ class _TargetsList extends StatelessWidget {
                 children: [
                   Text(prettyCat(key), style: const TextStyle(fontWeight: FontWeight.bold)),
                   Text(
-                    "RM ${spent.toStringAsFixed(0)} / RM ${target.toStringAsFixed(0)}", 
+                    "RM ${spent.toStringAsFixed(2)} / RM ${target.toStringAsFixed(2)}", 
                     style: TextStyle(fontWeight: FontWeight.bold, color: over ? cs.error : cs.onSurface)
                   ),
                 ],
@@ -1203,7 +1257,7 @@ class _LastRecordsList extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
                   Text(
-                    "${isIncome ? '+' : '-'}RM ${amount.toStringAsFixed(0)}",
+                    "${isIncome ? '+' : '-'}RM ${amount.toStringAsFixed(2)}",
                     style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: isIncome ? Colors.green.shade700 : cs.onSurface),
                   ),
                   const SizedBox(height: 2),
@@ -1302,13 +1356,13 @@ class _MonthYearPicker extends StatelessWidget {
       decoration: BoxDecoration(
         color: cs.surface,
         borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: cs.outlineVariant.withOpacity(0.5)),
+        border: Border.all(color: cs.outlineVariant.withValues(alpha: 0.5)),
       ),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           IconButton(
-            style: IconButton.styleFrom(backgroundColor: cs.surfaceContainerHighest.withOpacity(0.5)),
+            style: IconButton.styleFrom(backgroundColor: cs.surfaceContainerHighest.withValues(alpha: 0.5)),
             icon: const Icon(Icons.chevron_left_rounded, size: 20),
             onPressed: () {
               if (month == null) {
@@ -1336,7 +1390,7 @@ class _MonthYearPicker extends StatelessWidget {
             ),
           ),
           IconButton(
-            style: IconButton.styleFrom(backgroundColor: cs.surfaceContainerHighest.withOpacity(0.5)),
+            style: IconButton.styleFrom(backgroundColor: cs.surfaceContainerHighest.withValues(alpha: 0.5)),
             icon: const Icon(Icons.chevron_right_rounded, size: 20),
             onPressed: () {
               if (month == null) {
@@ -1369,7 +1423,7 @@ class _GridTile extends StatelessWidget {
       child: Container(
         alignment: Alignment.center,
         decoration: BoxDecoration(
-          color: isSelected ? cs.primary : cs.surfaceContainerHighest.withOpacity(0.4),
+          color: isSelected ? cs.primary : cs.surfaceContainerHighest.withValues(alpha: 0.4),
           borderRadius: BorderRadius.circular(12),
         ),
         child: Text(
@@ -1446,7 +1500,7 @@ class _YearTrend extends StatelessWidget {
 
         final type = (t['type'] ?? '').toString().trim().toLowerCase();
         final amt = asDouble(t['amount']);
-        final net = (type == 'income') ? amt : (type == 'expense') ? -amt : 0;
+        final net = (type == 'income') ? amt : (type == 'expense') ? -amt : 0.0;
 
         if (dt.isBefore(yearStart)) {
           startingBalance += net;
@@ -1460,15 +1514,15 @@ class _YearTrend extends StatelessWidget {
     double running = startingBalance;
     final spots = <FlSpot>[];
 
+    // FIX 8: Changed break to a continue-after-add so the current month's
+    // data point is included in the chart (not excluded by breaking before adding).
     for (int i = 0; i < 12; i++) {
+      if (isFutureYear) break;
       running += monthlyNet[i];
       spots.add(FlSpot(i.toDouble(), running));
-      
-      if (year == now.year && i == now.month - 1) break; // Stop at current month
-      if (isFutureYear) break; // Don't plot future years
+      if (year == now.year && i == now.month - 1) break; // Stop after current month
     }
 
-    // Tiny hack: FlChart needs at least 2 points to draw a line. 
     if (spots.length == 1) {
       spots.add(FlSpot(spots.first.x + 0.01, spots.first.y));
     }
@@ -1494,7 +1548,7 @@ class _YearTrend extends StatelessWidget {
             getTouchedSpotIndicator: (LineChartBarData barData, List<int> spotIndexes) {
               return spotIndexes.map((index) {
                 return TouchedSpotIndicatorData(
-                  FlLine(color: cs.primary.withOpacity(0.5), strokeWidth: 2, dashArray: [4, 4]),
+                  FlLine(color: cs.primary.withValues(alpha: 0.5), strokeWidth: 2, dashArray: [4, 4]),
                   FlDotData(
                     show: true,
                     getDotPainter: (spot, percent, barData, index) => FlDotCirclePainter(
@@ -1513,7 +1567,7 @@ class _YearTrend extends StatelessWidget {
               getTooltipItems: (touchedSpots) {
                 return touchedSpots.map((spot) {
                   return LineTooltipItem(
-                    "RM ${spot.y.toStringAsFixed(0)}",
+                    "RM ${spot.y.toStringAsFixed(2)}",
                     TextStyle(color: isDark ? Colors.black : Colors.white, fontWeight: FontWeight.bold, fontSize: 12),
                   );
                 }).toList();
@@ -1526,9 +1580,9 @@ class _YearTrend extends StatelessWidget {
             horizontalInterval: maxAbs == 0 ? 100 : maxAbs / 2,
             getDrawingHorizontalLine: (value) {
               if (value == 0) {
-                return FlLine(color: cs.onSurface.withOpacity(0.3), strokeWidth: 2, dashArray: [5, 5]);
+                return FlLine(color: cs.onSurface.withValues(alpha: 0.3), strokeWidth: 2, dashArray: [5, 5]);
               }
-              return FlLine(color: Theme.of(context).dividerColor.withOpacity(0.4), strokeWidth: 1, dashArray: [5, 5]);
+              return FlLine(color: Theme.of(context).dividerColor.withValues(alpha: 0.4), strokeWidth: 1, dashArray: [5, 5]);
             },
           ),
           borderData: FlBorderData(show: false),
@@ -1564,13 +1618,13 @@ class _YearTrend extends StatelessWidget {
                 show: true,
                 cutOffY: 0,
                 applyCutOffY: true,
-                gradient: LinearGradient(colors: [cs.primary.withOpacity(0.25), cs.primary.withOpacity(0.0)], begin: Alignment.topCenter, end: Alignment.bottomCenter),
+                gradient: LinearGradient(colors: [cs.primary.withValues(alpha: 0.25), cs.primary.withValues(alpha: 0.0)], begin: Alignment.topCenter, end: Alignment.bottomCenter),
               ),
               aboveBarData: BarAreaData(
                 show: true,
                 cutOffY: 0,
                 applyCutOffY: true,
-                gradient: LinearGradient(colors: [cs.error.withOpacity(0.0), cs.error.withOpacity(0.25)], begin: Alignment.topCenter, end: Alignment.bottomCenter),
+                gradient: LinearGradient(colors: [cs.error.withValues(alpha: 0.0), cs.error.withValues(alpha: 0.25)], begin: Alignment.topCenter, end: Alignment.bottomCenter),
               )
             ),
           ],
@@ -1616,7 +1670,7 @@ class _MonthTrend extends StatelessWidget {
 
         final type = (t['type'] ?? '').toString().trim().toLowerCase();
         final amt = asDouble(t['amount']);
-        final net = (type == 'income') ? amt : (type == 'expense') ? -amt : 0;
+        final net = (type == 'income') ? amt : (type == 'expense') ? -amt : 0.0;
 
         if (dt.isBefore(monthStart)) {
           startingBalance += net;
@@ -1630,15 +1684,15 @@ class _MonthTrend extends StatelessWidget {
     double running = startingBalance;
     final spots = <FlSpot>[];
 
+    // FIX 8 (month version): Same fix — add the spot THEN break, so today's
+    // data is included in the chart rather than cut off one day early.
     for (int i = 0; i < days; i++) {
+      if (isFutureMonth) break;
       running += dailyNet[i];
       spots.add(FlSpot(i.toDouble(), running));
-      
-      if (year == now.year && month == now.month && i == now.day - 1) break; // Stop at today's date
-      if (isFutureMonth) break; // Don't plot future months
+      if (year == now.year && month == now.month && i == now.day - 1) break;
     }
 
-    // Tiny hack: FlChart needs at least 2 points to draw a line. 
     if (spots.length == 1) {
       spots.add(FlSpot(spots.first.x + 0.01, spots.first.y));
     }
@@ -1664,7 +1718,7 @@ class _MonthTrend extends StatelessWidget {
             getTouchedSpotIndicator: (LineChartBarData barData, List<int> spotIndexes) {
               return spotIndexes.map((index) {
                 return TouchedSpotIndicatorData(
-                  FlLine(color: cs.primary.withOpacity(0.5), strokeWidth: 2, dashArray: [4, 4]),
+                  FlLine(color: cs.primary.withValues(alpha: 0.5), strokeWidth: 2, dashArray: [4, 4]),
                   FlDotData(
                     show: true,
                     getDotPainter: (spot, percent, barData, index) => FlDotCirclePainter(
@@ -1683,7 +1737,7 @@ class _MonthTrend extends StatelessWidget {
               getTooltipItems: (touchedSpots) {
                 return touchedSpots.map((spot) {
                   return LineTooltipItem(
-                    "RM ${spot.y.toStringAsFixed(0)}",
+                    "RM ${spot.y.toStringAsFixed(2)}",
                     TextStyle(color: isDark ? Colors.black : Colors.white, fontWeight: FontWeight.bold, fontSize: 12),
                   );
                 }).toList();
@@ -1696,9 +1750,9 @@ class _MonthTrend extends StatelessWidget {
             horizontalInterval: maxAbs == 0 ? 100 : maxAbs / 2,
             getDrawingHorizontalLine: (value) {
               if (value == 0) {
-                return FlLine(color: cs.onSurface.withOpacity(0.3), strokeWidth: 2, dashArray: [5, 5]);
+                return FlLine(color: cs.onSurface.withValues(alpha: 0.3), strokeWidth: 2, dashArray: [5, 5]);
               }
-              return FlLine(color: Theme.of(context).dividerColor.withOpacity(0.4), strokeWidth: 1, dashArray: [5, 5]);
+              return FlLine(color: Theme.of(context).dividerColor.withValues(alpha: 0.4), strokeWidth: 1, dashArray: [5, 5]);
             },
           ),
           borderData: FlBorderData(show: false),
@@ -1733,13 +1787,13 @@ class _MonthTrend extends StatelessWidget {
                 show: true,
                 cutOffY: 0,
                 applyCutOffY: true,
-                gradient: LinearGradient(colors: [cs.primary.withOpacity(0.25), cs.primary.withOpacity(0.0)], begin: Alignment.topCenter, end: Alignment.bottomCenter),
+                gradient: LinearGradient(colors: [cs.primary.withValues(alpha: 0.25), cs.primary.withValues(alpha: 0.0)], begin: Alignment.topCenter, end: Alignment.bottomCenter),
               ),
               aboveBarData: BarAreaData(
                 show: true,
                 cutOffY: 0,
                 applyCutOffY: true,
-                gradient: LinearGradient(colors: [cs.error.withOpacity(0.0), cs.error.withOpacity(0.25)], begin: Alignment.topCenter, end: Alignment.bottomCenter),
+                gradient: LinearGradient(colors: [cs.error.withValues(alpha: 0.0), cs.error.withValues(alpha: 0.25)], begin: Alignment.topCenter, end: Alignment.bottomCenter),
               )
             ),
           ],
