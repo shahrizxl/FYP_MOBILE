@@ -225,6 +225,127 @@ class _TransactionManagementPageState extends State<TransactionManagementPage> {
       });
     }
   }
+  
+  Future<void> _confirmDeleteMonth() async {
+    final uid = userId;
+
+    if (uid == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("User session expired."),
+        ),
+      );
+      return;
+    }
+
+    if (selectedMonth == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            "Please select a specific month first.",
+          ),
+        ),
+      );
+      return;
+    }
+
+    final cs = Theme.of(context).colorScheme;
+
+    final monthName = DateFormat("MMMM")
+        .format(DateTime(selectedYear, selectedMonth!));
+
+    final bool? ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(24),
+        ),
+        title: const Text("Delete Monthly Transactions?"),
+        content: Text(
+          "Delete all transactions for "
+          "$monthName $selectedYear?\n\n"
+          "This action cannot be undone.",
+          style: TextStyle(
+            color: cs.onSurfaceVariant,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text("Cancel"),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: cs.error,
+            ),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text("Delete"),
+          ),
+        ],
+      ),
+    );
+
+    if (ok != true || !mounted) return;
+
+    try {
+      setState(() {
+        loading = true;
+        error = null;
+      });
+
+      final startDate =
+          DateTime(selectedYear, selectedMonth!, 1);
+
+      final endDate =
+          DateTime(selectedYear, selectedMonth! + 1, 1);
+
+      await Supabase.instance.client
+          .from('transactions')
+          .delete()
+          .eq('user_id', uid)
+          .gte(
+            'date',
+            startDate.toIso8601String(),
+          )
+          .lt(
+            'date',
+            endDate.toIso8601String(),
+          );
+
+      globalTransactionUpdateNotifier.value++;
+
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            "Transactions for $monthName $selectedYear deleted.",
+          ),
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+        ),
+      );
+
+      await loadTx();
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        loading = false;
+        error = e.toString();
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            "Failed to delete transactions: $e",
+          ),
+        ),
+      );
+    }
+  }
 
   Future<void> _openEdit(Map<String, dynamic> t) async {
     await Navigator.push<bool>(
@@ -277,9 +398,25 @@ class _TransactionManagementPageState extends State<TransactionManagementPage> {
     return Scaffold(
       backgroundColor: cs.surfaceContainerLowest,
       appBar: AppBar(
-        title: const Text("Transactions", style: TextStyle(fontWeight: FontWeight.bold)),
+        title: const Text(
+          "Transactions",
+          style: TextStyle(
+            fontWeight: FontWeight.bold,
+          ),
+        ),
         centerTitle: true,
         elevation: 0,
+        actions: [
+          IconButton(
+            tooltip: "Delete Selected Month",
+            icon: const Icon(
+              Icons.delete_forever_rounded,
+            ),
+            onPressed: selectedMonth == null
+                ? null
+                : _confirmDeleteMonth,
+          ),
+        ],
       ),
 
       body: GestureDetector(

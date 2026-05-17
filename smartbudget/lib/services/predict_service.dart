@@ -7,22 +7,31 @@ Future<Map<String, dynamic>> predict(
   required int anchorYear,
   required int anchorMonth,
 }) async {
-  final String url = ApiConfig.PredictUrl;
+  final res = await http
+      .post(
+        Uri.parse(ApiConfig.predictUrl),
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({
+          'transactions': txs,
+          'days': 30,
+          'anchor_year': anchorYear,
+          'anchor_month': anchorMonth,
+        }),
+      )
+      .timeout(const Duration(seconds: 20));
 
-  final res = await http.post(
-    Uri.parse(url),
-    headers: {'Content-Type': 'application/json'},
-    body: jsonEncode({
-      'transactions': txs,
-      'days': 30,
-      'anchor_year': anchorYear,
-      'anchor_month': anchorMonth,
-    }),
-  );
 
   if (res.statusCode < 200 || res.statusCode >= 300) {
-    throw Exception('API error ${res.statusCode}: ${res.body}');
+    throw Exception(
+      'API error ${res.statusCode}: ${res.body}',
+    );
   }
 
-  return jsonDecode(res.body) as Map<String, dynamic>;
+  try {
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  } catch (e) {
+    throw Exception("Invalid JSON response");
+  }
 }

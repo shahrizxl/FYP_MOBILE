@@ -57,9 +57,11 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
 
   // Speech
   final stt.SpeechToText _speech = stt.SpeechToText();
-  bool _speechReady  = false;
-  bool _isListening  = false;
-  String _preSpeechText = ''; // text in field before mic started
+  bool    _speechReady   = false;
+  bool    _isListening   = false;
+  String  _preSpeechText = '';
+  int     _retryCount    = 0;
+  static const int _maxRetries = 2;
 
   late AnimationController _pulseCtrl;
   late Animation<double>   _pulseScale;
@@ -109,87 +111,137 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
 
   // ── STT Init ───────────────────────────────────────────────────────────────
   Future<void> _initSpeech() async {
-    _speechReady = await _speech.initialize(
-      onError: (e) {
-        // Ignore "error_speech_timeout" — it fires on normal pauses
-        if (mounted) setState(() => _isListening = false);
-      },
-      onStatus: (s) {
-        if (!mounted) return;
-        // 'done' and 'notListening' both mean the session ended
-        if (s == 'done' || s == 'notListening') {
-          setState(() => _isListening = false);
-        }
-      },
-    );
-    if (mounted) setState(() {});
+    try {
+      _speechReady = await _speech.initialize(
+        onError: _onSpeechError,
+        onStatus: _onSpeechStatus,
+      );
+    } catch (e) {
+      _speechReady = false;
+    }
+ 
+    // FIX: Show clear message if permission was denied
+    if (!_speechReady && mounted) {
+      setState(() => error = 'Microphone permission denied. Enable it in Settings.');
+    } else if (mounted) {
+      setState(() {});
+    }
+  }
+
+  void _onSpeechStatus(String status) {
+    if (!mounted) return;
+    // Both 'done' and 'notListening' mean the session ended
+    if (status == 'done' || status == 'notListening') {
+      setState(() => _isListening = false);
+    }
+  }
+
+void _onSpeechError(dynamic errorNotification) {
+    if (!mounted) return;
+ 
+    final errorMsg = errorNotification.errorMsg ?? errorNotification.toString();
+ 
+    // FIX: These are NORMAL — do NOT show error UI for them
+    const ignoredErrors = [
+      'error_speech_timeout',
+      'error_no_match',        // user said nothing
+      'error_audio',           // brief mic interruption
+    ];
+    if (ignoredErrors.any((e) => errorMsg.contains(e))) {
+      setState(() => _isListening = false);
+      return;
+    }
+ 
+    // For real errors, stop and optionally retry once
+    setState(() => _isListening = false);
+ 
+    // Retry on network/recognizer errors (common on first use)
+    if (_retryCount < _maxRetries &&
+        (errorMsg.contains('error_network') ||
+         errorMsg.contains('error_recognizer_busy'))) {
+      _retryCount++;
+      Future.delayed(const Duration(milliseconds: 500), _startListening);
+      return;
+    }
+ 
+    _retryCount = 0;
+    // Only show error for genuinely unexpected failures
+    setState(() => error = 'Voice input failed. Please try again.');
   }
 
   // ── Start Listening ────────────────────────────────────────────────────────
   Future<void> _startListening() async {
-    if (!_speechReady) return;
-
-    // Snapshot whatever is already typed so we can append speech to it
-    _preSpeechText = ctrl.text;
-
-    setState(() => _isListening = true);
-
+    if (!_speechReady) {
+      setState(() => error = 'Microphone not available.');
+      return;
+    }
+ 
+    // FIX: Always stop any ongoing session before starting a new one
+    if (_speech.isListening) {
+      await _speech.stop();
+      await Future.delayed(const Duration(milliseconds: 200));
+    }
+ 
+    _preSpeechText = ctrl.text.trim();
+    setState(() { _isListening = true; error = null; });
+ 
     await _speech.listen(
-      listenMode:     stt.ListenMode.dictation,  // natural continuous speech
-      partialResults: true,                       // get words as you speak
+      listenMode:     stt.ListenMode.dictation,
+      partialResults: true,
       listenFor:      const Duration(seconds: 30),
       pauseFor:       const Duration(seconds: 3),
-      onResult: (result) {
-        if (!mounted) return;
-        final spoken = result.recognizedWords.trim();
-        if (spoken.isEmpty) return;
-
-        // Append spoken words after any pre-existing text
-        final base    = _preSpeechText.trimRight();
-        final newText = base.isEmpty ? spoken : '$base $spoken';
-
-        setState(() {
-          ctrl.text      = newText;
-          ctrl.selection = TextSelection.collapsed(offset: newText.length);
-        });
-
-        // On a final result, update the pre-speech snapshot so the next
-        // partial doesn't duplicate already-confirmed words
-        if (result.finalResult) {
-          _preSpeechText = newText;
-        }
-      },
+      onResult:       _onSpeechResult,
+      // FIX: Set localeId explicitly to avoid wrong language on some devices
+      // localeId: 'en_US', // uncomment if needed
     );
   }
 
+  void _onSpeechResult(dynamic result) {
+    if (!mounted) return;
+ 
+    final spoken = (result.recognizedWords as String).trim();
+    if (spoken.isEmpty) return;
+ 
+    // FIX: Always combine base + current partial — never let partials stack
+    final base    = _preSpeechText.isEmpty ? '' : '${_preSpeechText.trimRight()} ';
+    final newText = '$base$spoken';
+ 
+    setState(() {
+      ctrl.text      = newText;
+      ctrl.selection = TextSelection.collapsed(offset: newText.length);
+    });
+ 
+    // FIX: On final result, advance the baseline so next partial doesn't repeat
+    if (result.finalResult == true) {
+      _preSpeechText = newText;
+    }
+  }
+
   // ── Stop Listening ─────────────────────────────────────────────────────────
-  Future<void> _stopListening() async {
-    await _speech.stop();
-    _preSpeechText = ctrl.text; // keep current text as baseline
+ Future<void> _stopListening() async {
+    if (_speech.isListening) {
+      await _speech.stop();
+    }
+    _preSpeechText = ctrl.text.trim();
     if (mounted) setState(() => _isListening = false);
   }
 
   // ── Toggle Mic ─────────────────────────────────────────────────────────────
   Future<void> _toggleMic() async {
-    if (!_speechReady) {
-      setState(() => error = 'Mic not available');
-      return;
+      HapticFeedback.mediumImpact();
+      if (_isListening) {
+        await _stopListening();
+      } else {
+        _retryCount = 0; // reset retry count on fresh user tap
+        await _startListening();
+      }
     }
-    
-    HapticFeedback.mediumImpact();
-    
-    if (_isListening) {
-      await _stopListening();
-    } else {
-      await _startListening();
-    }
-  }
 
   @override
   void dispose() {
     _pulseCtrl.dispose();
     _breathCtrl.dispose();
-    try { _speech.cancel(); } catch (_) {}
+    _speech.cancel();   // fire-and-forget is fine here, no need for try/catch
     ctrl.dispose();
     _scrollCtrl.dispose();
     super.dispose();
