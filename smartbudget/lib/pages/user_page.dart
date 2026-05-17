@@ -1913,11 +1913,13 @@ class _MetricsPanel extends StatelessWidget {
     final cs = Theme.of(context).colorScheme;
     if (metrics.isEmpty) return const SizedBox.shrink();
 
-    // Show the accepted model; fall back to first entry
-    final m = metrics.firstWhere(
-      (m) => m['accepted'] == true,
-      orElse: () => metrics.first,
-    );
+    // --- FIX: Sort accepted models by lowest MAE (error) first ---
+    final acceptedMetrics = metrics.where((m) => m['accepted'] == true).toList();
+    acceptedMetrics.sort((a, b) => (a['mae'] as num).compareTo(b['mae'] as num));
+
+    // Show the best accepted model; fall back to first entry if none accepted
+    final m = acceptedMetrics.isNotEmpty ? acceptedMetrics.first : metrics.first;
+    // -------------------------------------------------------------
 
     final double r2      = double.tryParse(m['r2']?.toString() ?? '') ?? 0;
     final String modelName = (m['model'] ?? 'Model').toString();
