@@ -39,6 +39,7 @@ class _TransactionManagementPageState extends State<TransactionManagementPage> {
     "personal_care": Icons.spa_rounded,
     "pets": Icons.pets_rounded,
     "home": Icons.home_rounded,
+    "travel": Icons.flight_rounded,
     "income": Icons.attach_money_rounded,
     "other": Icons.category_rounded,
   };

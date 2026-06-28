@@ -36,6 +36,7 @@ class _PlannedPaymentsPageState extends State<PlannedPaymentsPage> {
     "personal_care",
     "pets",
     "home",
+    "travel",
     "income",
     "other",
   ];

@@ -6,6 +6,7 @@ import 'category_breakdown_page.dart';
 import 'saving_goals_page.dart';
 import 'planned_payments_page.dart';
 import '../services/globals.dart';
+import 'prediction_page.dart';
 
 class MorePage extends StatefulWidget {
   const MorePage({super.key});
@@ -19,7 +20,7 @@ class _MorePageState extends State<MorePage> {
   String? error;
 
   int selectedYear = DateTime.now().year;
-  int? selectedMonth = DateTime.now().month; // ✅ nullable => supports All Year
+  int? selectedMonth = DateTime.now().month;
 
   List<Map<String, dynamic>> txs = [];
 
@@ -41,17 +42,16 @@ class _MorePageState extends State<MorePage> {
 
   String _type(dynamic v) => (v ?? '').toString().trim().toLowerCase();
 
+  // FIX 2: Fast UI filtering using cached date
   bool _inSelectedYear(Map<String, dynamic> t) {
-    final dt = _parseDate(t['date'])?.toLocal();
-    if (dt == null) return false;
-    return dt.year == selectedYear;
+    final dt = t['_parsedDate'] as DateTime?;
+    return dt != null && dt.year == selectedYear;
   }
 
   bool _inSelectedMonth(Map<String, dynamic> t) {
     if (selectedMonth == null) return false;
-    final dt = _parseDate(t['date'])?.toLocal();
-    if (dt == null) return false;
-    return dt.year == selectedYear && dt.month == selectedMonth;
+    final dt = t['_parsedDate'] as DateTime?;
+    return dt != null && dt.year == selectedYear && dt.month == selectedMonth;
   }
 
   Future<void> loadTx() async {
@@ -78,9 +78,17 @@ class _MorePageState extends State<MorePage> {
           .eq('user_id', uid)
           .order('date', ascending: false);
 
+      // FIX 2: Pre-parse and cache the DateTimes 
+      final parsedData = List<Map<String, dynamic>>.from(res).map((t) {
+        return {
+          ...t,
+          '_parsedDate': _parseDate(t['date'])?.toLocal() ?? DateTime(0),
+        };
+      }).toList();
+
       if (!mounted) return;
       setState(() {
-        txs = List<Map<String, dynamic>>.from(res);
+        txs = parsedData;
       });
     } catch (e) {
       if (!mounted) return;
@@ -102,11 +110,9 @@ class _MorePageState extends State<MorePage> {
   @override
   void initState() {
     super.initState();
-
     globalTransactionUpdateNotifier.addListener(_onGlobalTxUpdate);
-
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      await loadTx();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      loadTx();
     });
   }
 
@@ -214,8 +220,27 @@ class _MorePageState extends State<MorePage> {
                           await loadTx();
                         },
                       ),
+
+
                       const SizedBox(height: 12),
 
+                        _ToolCard(
+                          icon: Icons.auto_awesome_rounded,
+                          iconColor: Colors.purple.shade600,
+                          title: "AI Prediction Details",
+                          subtitle: "View forecast insights and ML analysis",
+                          onTap: () async {
+                            await Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) => const PredictionDetailsPage(),
+                              ),
+                            );
+                          },
+                        ),
+
+                      const SizedBox(height: 12),
+                      
                       _ToolCard(
                         icon: Icons.pie_chart_rounded,
                         iconColor: cs.primary,

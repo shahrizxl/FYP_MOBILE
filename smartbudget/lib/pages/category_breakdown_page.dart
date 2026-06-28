@@ -34,6 +34,7 @@ class _CategoryBreakdownPageState extends State<CategoryBreakdownPage> {
     "pets",
     "home",
     "income",
+    "travel",
     "other",
   ];
 
@@ -47,6 +48,7 @@ class _CategoryBreakdownPageState extends State<CategoryBreakdownPage> {
     "personal_care",
     "pets",
     "home",
+    "travel",
   };
 
   static const List<Color> kPiePalette = [

@@ -1,9 +1,12 @@
 import 'package:flutter/foundation.dart'
-    show kIsWeb, defaultTargetPlatform, TargetPlatform;
+    show kIsWeb, defaultTargetPlatform, TargetPlatform, debugPrint;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timezone/data/latest_all.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
+import 'package:supabase_flutter/supabase_flutter.dart';
+
+
 
 import 'noti_log.dart';
 
@@ -16,19 +19,26 @@ class NotificationService {
 
   bool _initialized = false;
 
+  String get _uid => Supabase.instance.client.auth.currentUser?.id ?? 'guest';
+
 
   // ===== Notification IDs (Spaced to avoid collisions) =====
   static const int _testId = 999;
-  static const int _dailyId = 1001;
+  int get _dailyId =>
+    _stableIdFromString(
+      "daily_$_uid",
+      base: 1000,
+      mod: 500,
+    );
   static const int _monthStartId = 2001;
   static const int _monthEndId = 2002;
   static const int _salaryId = 2003;
   static const int _predictOverId = 2004;
 
-  // ===== SharedPreferences Keys =====
-  static const String _kReminderOn = "daily_reminder_on";
-  static const String _kReminderHour = "daily_reminder_hour";
-  static const String _kReminderMinute = "daily_reminder_minute";
+// ===== SharedPreferences Keys (User Specific) =====
+  String get _kReminderOn => "${_uid}_daily_reminder_on";
+  String get _kReminderHour => "${_uid}_daily_reminder_hour";
+  String get _kReminderMinute => "${_uid}_daily_reminder_minute";
 
   // ==============================
   // INIT
@@ -45,11 +55,50 @@ class NotificationService {
 
     const settings = InitializationSettings(android: android, iOS: ios);
 
-    await _plugin.initialize(settings);
+    await _plugin.initialize(
+      settings,
+      onDidReceiveNotificationResponse: (response) {
+        final payload = response.payload;
+        debugPrint("Notification tapped: $payload");
+      },
+    );
     await _requestPermissions();
 
     _initialized = true;
   }
+
+  Future<void> restorePlannedPayments() async {
+  final uid =
+      Supabase.instance.client.auth.currentUser?.id;
+
+  if (uid == null) return;
+
+  final items = await Supabase.instance.client
+      .from('planned_payments')
+      .select(
+          'id,title,amount,due_date,category,is_posted')
+      .eq('user_id', uid)
+      .eq('is_posted', false);
+
+  for (final p in items) {
+    final due =
+        DateTime.parse(p['due_date']).toLocal();
+
+    await schedulePlannedPaymentReminder(
+      plannedPaymentId:
+          p['id'].toString(),
+      title: p['title'].toString(),
+      amount:
+          (p['amount'] as num).toDouble(),
+      category:
+          p['category'].toString(),
+      dueDate: due,
+      remindDaysBefore: 1,
+      hour: 9,
+      minute: 0,
+    );
+  }
+}
 
   Future<void> _requestPermissions() async {
     if (kIsWeb) return;
@@ -88,7 +137,6 @@ class NotificationService {
     return const NotificationDetails(android: android, iOS: ios);
   }
 
-final Set<int> _shownIds = {};
 
 // ==============================
 // UPDATED NOTIFICATION FUNCTION
@@ -101,7 +149,6 @@ Future<void> _notifyOnce({
   required String body,
   String type = "info",
 }) async {
-  // 1) Always log to Supabase
   try {
     await NotificationLogService.instance.createOnce(
       notiKey: notiKey,
@@ -111,11 +158,7 @@ Future<void> _notifyOnce({
     );
   } catch (_) {}
 
-  // 2) Stop for web
   if (kIsWeb) return;
-
-  // ✅ ONLY session anti-spam
-  if (_shownIds.contains(id)) return;
 
   await init();
 
@@ -124,10 +167,8 @@ Future<void> _notifyOnce({
     title,
     body,
     _details(),
+    payload: notiKey,
   );
-
-  // ✅ ONLY session tracking (NOT permanent)
-  _shownIds.add(id);
 }
 
   Future<bool> _exactAlarmsAllowed() async {
@@ -210,7 +251,7 @@ Future<void> _notifyOnce({
     
     final keys = prefs.getKeys();
     for (final key in keys) {
-      if ((key.startsWith('budget_state-') || key.startsWith('predict_over_state-')) &&
+      if ((key.contains('_budget_state-') || key.contains('_predict_over_state-')) &&
           !key.contains(currentPeriod)) {
         await prefs.remove(key);
       }
@@ -363,7 +404,7 @@ Future<void> _notifyOnce({
       newState = 1;
     }
 
-    final stateKey = "budget_state-$period-$catKey";
+    final stateKey = "${_uid}_budget_state-$period-$catKey";
     final oldState = await _getIntPref(stateKey, def: 0);
 
     if (newState < oldState) {
@@ -412,7 +453,7 @@ Future<void> _notifyOnce({
     if (!_isCurrentMonth(budgetYear, budgetMonth)) return;
 
     final period = _periodKey(budgetYear, budgetMonth);
-    final key = "predict_over_state-$period";
+    final key = "${_uid}_predict_over_state-$period";
 
     final isOver = predicted > monthlyBudget;
     final old = await _getIntPref(key, def: 0);
@@ -523,7 +564,7 @@ Future<void> _notifyOnce({
   // STREAK (EDGE TRIGGERED)
   // ==============================
   Future<void> checkStreak(int streak) async {
-    const key = "streak7_state";
+    final key = "${_uid}_streak7_state";
     final old = await _getIntPref(key, def: 0);
     final nowState = (streak >= 7) ? 1 : 0;
 
@@ -557,7 +598,7 @@ Future<void> _notifyOnce({
       bucket = 3;
     }
 
-    const key = "inactive_bucket_state";
+    final key = "${_uid}_inactive_bucket_state";
     final oldBucket = await _getIntPref(key, def: 0);
 
     if (bucket < oldBucket) {
@@ -593,7 +634,7 @@ Future<void> _notifyOnce({
       level = 1;
     }
 
-    const key = "savings_milestone_level";
+    final key = "${_uid}_savings_milestone_level";
     final oldLevel = await _getIntPref(key, def: 0);
 
     if (level < oldLevel) {
@@ -740,6 +781,8 @@ Future<void> _notifyOnce({
     if (kIsWeb) return;
     await init();
     await _plugin.cancelAll();
+
+
 
     final prefs = await SharedPreferences.getInstance();
     final keys = prefs.getKeys();

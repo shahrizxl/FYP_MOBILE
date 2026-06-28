@@ -193,10 +193,17 @@ class _UserSettingsPageState extends State<UserSettingsPage> {
   // =========================
   // Reminder Persistence
   // =========================
-  static const _kReminderOn = "daily_reminder_on";
-  static const _kReminderHour = "daily_reminder_hour";
-  static const _kReminderMinute = "daily_reminder_minute";
+  String get _uid => user?.id ?? 'guest';
 
+  String get _kReminderOn =>
+      "${_uid}_daily_reminder_on";
+
+  String get _kReminderHour =>
+      "${_uid}_daily_reminder_hour";
+
+  String get _kReminderMinute =>
+      "${_uid}_daily_reminder_minute";
+      
   Future<void> _loadReminderPrefs() async {
     final prefs = await SharedPreferences.getInstance();
 

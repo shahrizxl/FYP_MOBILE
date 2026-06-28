@@ -20,6 +20,7 @@ import 'user_settings_page.dart';
 import 'category_breakdown_page.dart';
 import '../services/streak_service.dart';
 import '../services/globals.dart';
+import 'prediction_page.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // USER PAGE
@@ -52,91 +53,40 @@ class _UserPageState extends State<UserPage> {
   Map<String, double> _rawPctByCat = {};
   Map<String, double> _rawAmtByCat = {};
 
-  // ── Live metrics — sourced directly from backend live_metrics ────────────
+  // ── Live metrics ─────────────────────────────────────────────────────────
   double? _forecastProgress;
   double? _actualSpentSoFar;
   double? _remainingPrediction;
 
   // ── Prediction state ─────────────────────────────────────────────────────
   bool _predLoading = false;
-  String? _predError;    // real error messages (red badge)
-  String? _predMessage;  // method/status string (info badge)
+  String? _predError;    
+  String? _predMessage;  
   double? _predNextDay;
   double? _predNextWeek;
   double? _predNextMonth;
-
-  // Confidence interval
   double? _predNextMonthLower;
   double? _predNextMonthUpper;
-
-  // Explainability
   String? _predExplanationText;
   List<Map<String, dynamic>> _predFeatureImportances = [];
   List<Map<String, dynamic>> _predictionMetrics = [];
   Map<String, dynamic>? _predWeekendInfluence;
   List<Map<String, dynamic>> _predCategoryImpact = [];
-
-  // v5+ API fields
   List<Map<String, dynamic>> _predAnomalies = [];
   Map<String, dynamic>? _predMonthlyTrend;
 
-  // Request ID for cancelling stale responses
   int _predReqId = 0;
+
+  // ── ML Training State (Cached) ───────────────────────────────────────────
+  int _mlDaysCount = 0;
+  int _mlDaysRemaining = 30;
+  double _mlProgress = 0.0;
+  bool _mlReady = false;
 
   // ── One-shot notification guards ─────────────────────────────────────────
   bool _milestoneChecked = false;
   bool _inactiveChecked = false;
-  final Set<String> _budgetAlertSentKeys = {};
 
-
-  // ─────────────────────────────────────────────────────────────────────────
-// ML TRAINING DATA STATUS
-// ─────────────────────────────────────────────────────────────────────────
-
-int get _mlDaysCount {
-    final uniqueDays = <String>{};
-    
-    final now = DateTime.now();
-    // Start 6 months ago from the 1st of the current month.
-    // For example, if today is May 17th, this starts counting from Nov 1st.
-    final trainStart = DateTime(now.year, now.month - 6, 1);
-
-    for (final tx in _txs) {
-      // 1. FILTER: Must be an expense
-      final type = tx['type']?.toString().toLowerCase().trim() ?? 'expense';
-      if (type != 'expense') continue;
-
-      final dt = _parseDate(tx['date']);
-      if (dt == null) continue;
-
-      // 2. FILTER: Include everything from 6 months ago up to right now.
-      // This deletes old data (before trainStart) and accidental future dates.
-      if (dt.isBefore(trainStart) || dt.isAfter(now)) {
-        continue; 
-      }
-
-      // 3. ADD UNIQUE DATE
-      final key =
-          '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')}';
-
-      uniqueDays.add(key);
-    }
-
-    return uniqueDays.length;
-  }
-
-  int get _mlDaysRemaining {
-    final remain = 90 - _mlDaysCount; 
-    return remain < 0 ? 0 : remain;
-  }
-
-  double get _mlProgress {
-    return (_mlDaysCount / 90).clamp(0.0, 1.0);
-  }
-
-  bool get _mlReady {
-    return _mlDaysCount >= 90;
-  }
   // ─────────────────────────────────────────────────────────────────────────
   // GETTERS
   // ─────────────────────────────────────────────────────────────────────────
@@ -159,13 +109,21 @@ int get _mlDaysCount {
   void initState() {
     super.initState();
     globalTransactionUpdateNotifier.addListener(_onGlobalTxUpdate);
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      await _silentlyUpdateStreak();
-      await _loadTx();
-      await _loadTargets();
-      await _loadPrediction();
-      await _checkInactiveUser();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _initializeData();
     });
+  }
+
+  // FIX 1: Run APIs concurrently and do not block the UI waiting for predictions
+  Future<void> _initializeData() async {
+    _silentlyUpdateStreak(); // Fire and forget
+    
+    await _loadTx();
+    await _loadTargets();
+
+
+    _loadPrediction(); // Let it load in the background
+    _checkInactiveUser();
   }
 
   @override
@@ -192,17 +150,16 @@ int get _mlDaysCount {
     return DateFormat('dd-MM-yyyy').format(dt.toLocal());
   }
 
+  // FIX 2: Filter using the pre-parsed cached date for immense speedup
   bool _inSelectedYear(Map<String, dynamic> t) {
-    final dt = _parseDate(t['date'])?.toLocal();
+    final dt = t['_parsedDate'] as DateTime?;
     return dt != null && dt.year == _selectedYear;
   }
 
   bool _inSelectedMonth(Map<String, dynamic> t) {
     if (_selectedMonth == null) return false;
-    final dt = _parseDate(t['date'])?.toLocal();
-    return dt != null &&
-        dt.year == _selectedYear &&
-        dt.month == _selectedMonth;
+    final dt = t['_parsedDate'] as DateTime?;
+    return dt != null && dt.year == _selectedYear && dt.month == _selectedMonth;
   }
 
   double _asDouble(dynamic v) {
@@ -234,8 +191,7 @@ int get _mlDaysCount {
         .join(' ');
   }
 
-  Map<String, double> _spentByCategoryForMonth(
-      List<Map<String, dynamic>> monthTx) {
+  Map<String, double> _spentByCategoryForMonth(List<Map<String, dynamic>> monthTx) {
     final Map<String, double> totals = {};
     for (final t in monthTx) {
       if ((t['type'] ?? '').toString().trim().toLowerCase() != 'expense') {
@@ -264,7 +220,6 @@ int get _mlDaysCount {
     _predCategoryImpact = [];
     _predAnomalies = [];
     _predMonthlyTrend = null;
-    // Clear live metrics so stale values don't persist on month switch
     _forecastProgress = null;
     _actualSpentSoFar = null;
     _remainingPrediction = null;
@@ -285,7 +240,6 @@ int get _mlDaysCount {
     });
 
     if (uid == null) {
-      if (!mounted) return;
       setState(() {
         _loading = false;
         _error = 'Session expired. Please login again.';
@@ -296,33 +250,34 @@ int get _mlDaysCount {
 
     try {
       final data = await _txService.getMyTransactions(uid);
-      // Sort descending (newest first) for display purposes
-      final sorted = List<Map<String, dynamic>>.from(data)
-        ..sort((a, b) {
-          final ad = _parseDate(a['date'])?.toLocal() ??
-              DateTime.fromMillisecondsSinceEpoch(0);
-          final bd = _parseDate(b['date'])?.toLocal() ??
-              DateTime.fromMillisecondsSinceEpoch(0);
-          return bd.compareTo(ad);
-        });
+      
+      // FIX 2: Parse DateTimes ONCE and cache them inside the map
+      final parsedData = data.map((t) {
+        final dt = _parseDate(t['date'])?.toLocal() ?? DateTime.fromMillisecondsSinceEpoch(0);
+        return {
+          ...t,
+          '_parsedDate': dt,
+        };
+      }).toList();
+
+      // Sort using the cached dates
+      parsedData.sort((a, b) => (b['_parsedDate'] as DateTime).compareTo(a['_parsedDate'] as DateTime));
 
       if (!mounted) return;
-      setState(() => _txs = sorted);
+      _txs = parsedData;
+      
+      // Calculate ML metrics only when transactions change
+      _calculateMlMetrics();
 
       // Milestone notification (once per session)
       if (!_milestoneChecked) {
-        final income = sorted
-            .where((t) =>
-                (t['type'] ?? '').toString().trim().toLowerCase() == 'income')
+        final income = _txs.where((t) => (t['type'] ?? '').toString().trim().toLowerCase() == 'income')
             .fold<double>(0, (s, t) => s + _asDouble(t['amount']));
-        final expense = sorted
-            .where((t) =>
-                (t['type'] ?? '').toString().trim().toLowerCase() == 'expense')
+        final expense = _txs.where((t) => (t['type'] ?? '').toString().trim().toLowerCase() == 'expense')
             .fold<double>(0, (s, t) => s + _asDouble(t['amount']));
         final balance = income - expense;
         if (balance > 0) {
           await NotificationService.instance.checkSavingMilestone(balance);
-          if (!mounted) return;
         }
         _milestoneChecked = true;
       }
@@ -335,6 +290,30 @@ int get _mlDaysCount {
     } finally {
       if (mounted) setState(() => _loading = false);
     }
+  }
+
+  // FIX 3: Centralized metric calculation instead of expensive getters
+  void _calculateMlMetrics() {
+    final uniqueDays = <String>{};
+    final now = DateTime.now();
+    final trainStart = DateTime(now.year, now.month - 6, 1);
+
+    for (final tx in _txs) {
+      final type = tx['type']?.toString().toLowerCase().trim() ?? 'expense';
+      if (type != 'expense') continue;
+
+      final dt = tx['_parsedDate'] as DateTime?;
+      if (dt == null || dt.isBefore(trainStart) || dt.isAfter(now)) continue;
+
+      uniqueDays.add('${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')}');
+    }
+
+    setState(() {
+      _mlDaysCount = uniqueDays.length;
+      _mlDaysRemaining = (30 - _mlDaysCount).clamp(0, 30);
+      _mlProgress = (_mlDaysCount / 30).clamp(0.0, 1.0);
+      _mlReady = _mlDaysCount >= 30;
+    });
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -413,7 +392,6 @@ int get _mlDaysCount {
         }
       }
 
-      if (!mounted) return;
       setState(() {
         _monthlyBudget = mb;
         _rawPctByCat = pctMap;
@@ -421,23 +399,22 @@ int get _mlDaysCount {
         _targetRmByCat = rmMap;
       });
 
-      // Budget alert notifications
-      if (_selectedMonth != null && _targetRmByCat.isNotEmpty) {
-        final monthTx = _txs.where(_inSelectedMonth).toList();
-        final spentByCat = _spentByCategoryForMonth(monthTx);
-        for (final entry in _targetRmByCat.entries) {
-          final alertKey = '$_selectedYear-${_selectedMonth!}-${entry.key}';
-          if (_budgetAlertSentKeys.contains(alertKey)) continue;
-          await NotificationService.instance.checkBudgetAlert(
-            spent: spentByCat[entry.key] ?? 0,
-            budget: entry.value,
-            category: _prettyCat(entry.key),
-            budgetYear: _selectedYear,
-            budgetMonth: _selectedMonth!,
-          );
-          _budgetAlertSentKeys.add(alertKey);
-        }
+    // Budget alert notifications
+    if (_selectedMonth != null && _targetRmByCat.isNotEmpty) {
+      final monthTx = _txs.where(_inSelectedMonth).toList();
+      final spentByCat = _spentByCategoryForMonth(monthTx);
+
+      for (final entry in _targetRmByCat.entries) {
+        await NotificationService.instance.checkBudgetAlert(
+          spent: spentByCat[entry.key] ?? 0,
+          budget: entry.value,
+          category: _prettyCat(entry.key),
+          budgetYear: _selectedYear,
+          budgetMonth: _selectedMonth!,
+        );
       }
+    }
+
     } catch (e) {
       if (!mounted) return;
       setState(() => _targetsError = e.toString());
@@ -461,7 +438,6 @@ int get _mlDaysCount {
       return;
     }
 
-    // Stamp this request so stale responses are discarded
     final int reqId = ++_predReqId;
 
     setState(() {
@@ -471,69 +447,57 @@ int get _mlDaysCount {
       _clearPredictionState();
     });
 
-    // 1. Define the exact same 6-month window used in the ML progress ring
-        final now = DateTime.now();
-        final trainStart = DateTime(now.year, now.month - 6, 1);
+    final now = DateTime.now();
+    final trainStart = DateTime(now.year, now.month - 6, 1);
 
-        // FIX: filter to expenses only AND within the last 6 months BEFORE building the payload.
-        // Sort ascending (oldest first) for correct time-series ordering.
-        final expenses = _txs
-            .where((t) {
-              if ((t['type'] ?? '').toString().trim().toLowerCase() != 'expense') return false;
-              
-              final dt = _parseDate(t['date'])?.toLocal();
-              if (dt == null) return false;
-              
-              // Drop old data and accidental future dates to save payload size
-              if (dt.isBefore(trainStart) || dt.isAfter(now)) return false;
-              
-              return true;
-            })
-            .map((t) {
-              final dt = _parseDate(t['date'])!.toLocal();
-              return {
-                'date': DateFormat('yyyy-MM-dd').format(dt),
-                'amount': _asDouble(t['amount']),
-                'type': 'expense',
-                'description': (t['description'] ?? '').toString(),
-                'category': (t['category'] ?? '').toString(),
-              };
-            })
-            .toList()
-          ..sort((a, b) {
-            final ad = DateTime.tryParse(a['date'] as String) ?? DateTime(1970);
-            final bd = DateTime.tryParse(b['date'] as String) ?? DateTime(1970);
-            return ad.compareTo(bd);
-          });
+    final expenses = _txs
+        .where((t) {
+          if ((t['type'] ?? '').toString().trim().toLowerCase() != 'expense') return false;
+          final dt = t['_parsedDate'] as DateTime?; // Use cached date
+          if (dt == null || dt.isBefore(trainStart) || dt.isAfter(now)) return false;
+          return true;
+        })
+        .map((t) {
+          return {
+            'date': DateFormat('yyyy-MM-dd').format(t['_parsedDate'] as DateTime),
+            'amount': _asDouble(t['amount']),
+            'type': 'expense',
+            'description': (t['description'] ?? '').toString(),
+            'category': (t['category'] ?? '').toString(),
+          };
+        })
+        .toList()
+      ..sort((a, b) {
+        final ad = DateTime.tryParse(a['date'] as String) ?? DateTime(1970);
+        final bd = DateTime.tryParse(b['date'] as String) ?? DateTime(1970);
+        return ad.compareTo(bd);
+      });
 
-        if (expenses.isEmpty) {
-          if (!mounted || reqId != _predReqId) return;
-          setState(() {
-            _predLoading = false;
-            _predError = 'No expense records found.';
-          });
-          return;
-        }
+    if (expenses.isEmpty) {
+      if (!mounted || reqId != _predReqId) return;
+      setState(() {
+        _predLoading = false;
+        _predError = 'No expense records found.';
+      });
+      return;
+    }
 
-        final bool monthMode = _selectedMonth != null;
-        final Map<String, dynamic> body = {
-          // We removed `.take(500)` here because Flutter already filtered the list perfectly!
-          'transactions': expenses, 
-          'days': 60,
-        };
+    final bool monthMode = _selectedMonth != null;
+    final Map<String, dynamic> body = {
+      'transactions': expenses,
+      'days': 60,
+    };
     if (monthMode) {
       body['anchor_year'] = _selectedYear;
       body['anchor_month'] = _selectedMonth!;
     }
 
     try {
-      final res = await http
-          .post(
-            Uri.parse(ApiConfig.predictUrl),
-            headers: {'Content-Type': 'application/json'},
-            body: jsonEncode(body),
-          )
-          .timeout(const Duration(seconds: 15));
+      final res = await http.post(
+        Uri.parse(ApiConfig.predictUrl),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode(body),
+      ).timeout(const Duration(seconds: 30));
 
       if (!mounted || reqId != _predReqId) return;
 
@@ -546,10 +510,8 @@ int get _mlDaysCount {
       }
 
       final decoded = jsonDecode(res.body);
-      final data =
-          (decoded is Map<String, dynamic>) ? decoded : <String, dynamic>{};
+      final data = (decoded is Map<String, dynamic>) ? decoded : <String, dynamic>{};
 
-      // ── Core values ─────────────────────────────────────────────────────
       final nd  = _numOrNull(data['next_day']);
       final nw  = _numOrNull(data['next_week']);
       final nm  = _numOrNull(data['next_month']);
@@ -557,7 +519,6 @@ int get _mlDaysCount {
       final nmu = _numOrNull(data['next_month_upper']);
       final msg = (data['message'] ?? '').toString().trim();
 
-      // ── Metrics ─────────────────────────────────────────────────────────
       List<Map<String, dynamic>> metrics = [];
       if (data['metrics'] is List) {
         metrics = List<Map<String, dynamic>>.from(
@@ -565,7 +526,6 @@ int get _mlDaysCount {
         );
       }
 
-      // ── Explainability ───────────────────────────────────────────────────
       String? explanationText;
       List<Map<String, dynamic>> featureImportances = [];
       Map<String, dynamic>? weekendInfluence;
@@ -577,23 +537,19 @@ int get _mlDaysCount {
 
         if (expl['feature_importances'] is List) {
           featureImportances = List<Map<String, dynamic>>.from(
-            (expl['feature_importances'] as List)
-                .whereType<Map<String, dynamic>>(),
+            (expl['feature_importances'] as List).whereType<Map<String, dynamic>>(),
           );
         }
         if (expl['weekend_influence'] is Map<String, dynamic>) {
-          weekendInfluence =
-              expl['weekend_influence'] as Map<String, dynamic>;
+          weekendInfluence = expl['weekend_influence'] as Map<String, dynamic>;
         }
         if (expl['category_impact'] is List) {
           categoryImpact = List<Map<String, dynamic>>.from(
-            (expl['category_impact'] as List)
-                .whereType<Map<String, dynamic>>(),
+            (expl['category_impact'] as List).whereType<Map<String, dynamic>>(),
           );
         }
       }
 
-      // ── Anomalies ────────────────────────────────────────────────────────
       List<Map<String, dynamic>> anomalies = [];
       if (data['anomalies'] is List) {
         anomalies = List<Map<String, dynamic>>.from(
@@ -601,17 +557,14 @@ int get _mlDaysCount {
         );
       }
 
-      // ── Monthly trend — use backend data directly ─────────────────────
       Map<String, dynamic>? monthlyTrend;
       if (data['monthly_trend'] is Map<String, dynamic>) {
         monthlyTrend = data['monthly_trend'] as Map<String, dynamic>;
       }
 
-      // ── Live metrics — sourced from backend ──────────────────────────────
       double? actualSpent;
       double? remainingPrediction;
       double? forecastProgress;
-
       if (data['live_metrics'] is Map<String, dynamic>) {
         final lm = data['live_metrics'] as Map<String, dynamic>;
         actualSpent         = _numOrNull(lm['actual_spent']);
@@ -619,7 +572,6 @@ int get _mlDaysCount {
         forecastProgress    = _numOrNull(lm['progress_pct']);
       }
 
-      // ── Commit state ─────────────────────────────────────────────────────
       if (!mounted || reqId != _predReqId) return;
       setState(() {
         _predNextDay            = nd;
@@ -642,7 +594,6 @@ int get _mlDaysCount {
         _forecastProgress       = forecastProgress;
       });
 
-      // Budget warning notification
       if (monthMode && _predNextMonth != null && _monthlyBudget > 0) {
         await NotificationService.instance.safeSpendingWarning(
           predicted: _predNextMonth!,
@@ -667,14 +618,13 @@ int get _mlDaysCount {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  // STREAK
+  // STREAK & INACTIVE USER
   // ─────────────────────────────────────────────────────────────────────────
 
   Future<void> _silentlyUpdateStreak() async {
     if (_userId == null) return;
     try {
-      final data =
-          await StreakService(Supabase.instance.client).touchToday();
+      final data = await StreakService(Supabase.instance.client).touchToday();
       await _checkStreakNotification(data.streak);
     } catch (e) {
       debugPrint('Failed to update daily streak: $e');
@@ -691,20 +641,13 @@ int get _mlDaysCount {
     await prefs.setBool(key, true);
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // INACTIVE USER CHECK
-  // ─────────────────────────────────────────────────────────────────────────
-
   Future<void> _checkInactiveUser() async {
     if (!mounted) return;
-    // Guard: set flag immediately to prevent concurrent duplicate calls
     if (_inactiveChecked) return;
     if (_txs.isEmpty) return;
 
     _inactiveChecked = true;
-
-    // _txs is sorted descending so .first is the most recent transaction
-    final lastDate = _parseDate(_txs.first['date'])?.toLocal();
+    final lastDate = _txs.first['_parsedDate'] as DateTime?;
     if (lastDate == null) return;
 
     final daysInactive = DateTime.now().difference(lastDate).inDays;
@@ -725,17 +668,10 @@ int get _mlDaysCount {
     }
     await Navigator.push(
       context,
-      MaterialPageRoute(
-        builder: (_) =>
-            CategoryBreakdownPage(year: _selectedYear, month: _selectedMonth!),
-      ),
+      MaterialPageRoute(builder: (_) => CategoryBreakdownPage(year: _selectedYear, month: _selectedMonth!)),
     );
-    // mounted check required after every await that crosses a navigation
     if (!mounted) return;
-    await _loadTx();
-    await _loadTargets();
-    await _loadPrediction();
-    await _checkInactiveUser();
+    _initializeData();
   }
 
   Future<void> _openManage() async {
@@ -746,18 +682,12 @@ int get _mlDaysCount {
     if (!mounted) return;
     _milestoneChecked = false;
     _inactiveChecked = false;
-    await _loadTx();
-    await _loadTargets();
-    await _loadPrediction();
-    await _checkInactiveUser();
+    _initializeData();
   }
 
   Future<void> _onGlobalTxUpdate() async {
     if (!mounted) return;
-    await _loadTx();
-    await _loadTargets();
-    await _loadPrediction();
-    await _checkInactiveUser();
+    _initializeData();
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -778,75 +708,53 @@ int get _mlDaysCount {
             (_selectedYear == now.year && _selectedMonth! > now.month))
         : (_selectedYear > now.year);
 
-    // Don't show ML forecasts for future periods — there's nothing to predict FROM
     final double? displayNextDay   = isFuture ? null : _predNextDay;
     final double? displayNextWeek  = isFuture ? null : _predNextWeek;
     final double? displayNextMonth = isFuture ? null : _predNextMonth;
     final double? displayLower     = isFuture ? null : _predNextMonthLower;
     final double? displayUpper     = isFuture ? null : _predNextMonthUpper;
 
-    final bool showExplain = !isFuture &&
-        !_predLoading &&
+    final bool showExplain = !isFuture && !_predLoading &&
         (_predExplanationText != null || _predFeatureImportances.isNotEmpty);
 
-    final bool showAnomalies =
-        !isFuture && !_predLoading && _predAnomalies.isNotEmpty;
+    final bool showAnomalies = !isFuture && !_predLoading && _predAnomalies.isNotEmpty;
+    final bool showTrend = !isFuture && !_predLoading && _predMonthlyTrend != null;
+    final bool showLiveMetrics = !isFuture && !_predLoading &&
+        (_actualSpentSoFar != null || _remainingPrediction != null || _forecastProgress != null);
 
-    final bool showTrend =
-        !isFuture && !_predLoading && _predMonthlyTrend != null;
-
-    final bool showLiveMetrics = !isFuture &&
-        !_predLoading &&
-        (_actualSpentSoFar != null ||
-            _remainingPrediction != null ||
-            _forecastProgress != null);
-
-    // Active transactions for the selected period
     final yearTx  = _txs.where(_inSelectedYear).toList();
-    final monthTx = isMonthMode
-        ? _txs.where(_inSelectedMonth).toList()
-        : <Map<String, dynamic>>[];
+    final monthTx = isMonthMode ? yearTx.where(_inSelectedMonth).toList() : <Map<String, dynamic>>[];
     final activeTx = isMonthMode ? monthTx : yearTx;
 
     final label = isMonthMode
-        ? DateFormat('MMMM yyyy')
-            .format(DateTime(_selectedYear, _selectedMonth!))
+        ? DateFormat('MMMM yyyy').format(DateTime(_selectedYear, _selectedMonth!))
         : 'Year $_selectedYear';
 
     final incomeTotal = activeTx
-        .where((tx) =>
-            (tx['type'] ?? '').toString().trim().toLowerCase() == 'income')
+        .where((tx) => (tx['type'] ?? '').toString().trim().toLowerCase() == 'income')
         .fold<double>(0, (s, tx) => s + _asDouble(tx['amount']));
     final expenseTotal = activeTx
-        .where((tx) =>
-            (tx['type'] ?? '').toString().trim().toLowerCase() == 'expense')
+        .where((tx) => (tx['type'] ?? '').toString().trim().toLowerCase() == 'expense')
         .fold<double>(0, (s, tx) => s + _asDouble(tx['amount']));
 
     final double netBalance = incomeTotal - expenseTotal;
 
-    // Lifetime savings: total income minus total expenses across ALL time
     double totalSavings = 0;
     for (final item in _txs) {
       final type = (item['type'] ?? '').toString().trim().toLowerCase();
       final amt = _asDouble(item['amount']);
-      if (type == 'income') {
-        totalSavings += amt;
-      } else if (type == 'expense') {
-        totalSavings -= amt;
-      }
+      if (type == 'income') totalSavings += amt;
+      else if (type == 'expense') totalSavings -= amt;
     }
 
     final Map<String, double> catTotals = {};
     for (final tMap in activeTx) {
-      if ((tMap['type'] ?? '').toString().trim().toLowerCase() != 'expense') {
-        continue;
-      }
+      if ((tMap['type'] ?? '').toString().trim().toLowerCase() != 'expense') continue;
       final key = _normCatKey((tMap['category'] ?? '').toString().trim());
       catTotals[key] = (catTotals[key] ?? 0) + _asDouble(tMap['amount']);
     }
 
-    final topExpenses = catTotals.entries.toList()
-      ..sort((a, b) => b.value.compareTo(a.value));
+    final topExpenses = catTotals.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
     final top3 = topExpenses.take(3).toList();
     final last5 = activeTx.take(5).toList();
 
@@ -861,21 +769,11 @@ int get _mlDaysCount {
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              'Hello, $_displayName 👋',
-              style: TextStyle(
-                  fontSize: 14,
-                  color: cs.onSurfaceVariant,
-                  fontWeight: FontWeight.w600),
-            ),
+            Text('Hello, $_displayName 👋',
+                style: TextStyle(fontSize: 14, color: cs.onSurfaceVariant, fontWeight: FontWeight.w600)),
             const SizedBox(height: 2),
-            Text(
-              'SmartBudget',
-              style: TextStyle(
-                  fontSize: 24,
-                  fontWeight: FontWeight.bold,
-                  color: cs.onSurface),
-            ),
+            Text('SmartBudget',
+                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: cs.onSurface)),
           ],
         ),
         actions: [
@@ -883,20 +781,17 @@ int get _mlDaysCount {
             tooltip: 'Settings',
             icon: Icon(Icons.person_outline_rounded, color: cs.onSurface),
             onPressed: () async {
-              await Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const UserSettingsPage()),
-              );
+              await Navigator.push(context, MaterialPageRoute(builder: (_) => const UserSettingsPage()));
             },
           ),
           IconButton(
             tooltip: 'Logout',
             icon: Icon(Icons.logout_rounded, color: cs.error),
             onPressed: () async {
+              await NotificationService.instance.cancelAll();
               await AuthService().logout();
               if (context.mounted) {
-                Navigator.of(context).pushReplacement(
-                    MaterialPageRoute(builder: (_) => const AuthGate()));
+                Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => const AuthGate()));
               }
             },
           ),
@@ -911,15 +806,11 @@ int get _mlDaysCount {
                   onRefresh: () async {
                     _milestoneChecked = false;
                     _inactiveChecked = false;
-                    await _loadTx();
-                    await _loadTargets();
-                    await _loadPrediction();
-                    await _checkInactiveUser();
+                    await _initializeData();
                   },
                   child: ListView(
                     padding: const EdgeInsets.fromLTRB(16, 8, 16, 120),
                     children: [
-                      // ── Month / Year Picker ─────────────────────────────
                       _MonthYearPicker(
                         year: _selectedYear,
                         month: _selectedMonth,
@@ -931,13 +822,13 @@ int get _mlDaysCount {
                             _predMessage = null;
                             _clearPredictionState();
                           });
-                          await _loadTargets();
-                          await _loadPrediction();
+                          await Future.wait([
+                            _loadTargets(),
+                            _loadPrediction(),
+                          ]);
                         },
                       ),
                       const SizedBox(height: 16),
-
-                      // ── Hero card ───────────────────────────────────────
                       _DashboardHeroCard(
                         label: label,
                         income: incomeTotal,
@@ -946,242 +837,74 @@ int get _mlDaysCount {
                         totalSavings: totalSavings,
                       ),
                       const SizedBox(height: 16),
-
-
-                      // ── AI Predictions ──────────────────────────────────
-                     _SectionCard(
-  title: 'AI Predictions',
-  icon: Icons.auto_awesome_rounded,
-  headerTrailing: Container(
-    padding: const EdgeInsets.symmetric(
-      horizontal: 10, // Compact padding
-      vertical: 6,
-    ),
-    decoration: BoxDecoration(
-      borderRadius: BorderRadius.circular(12),
-      color: cs.surfaceContainerHighest.withValues(alpha: 0.45),
-      border: Border.all(
-        color: cs.primary.withValues(alpha: 0.15),
-      ),
-    ),
-    child: Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Icon(
-          Icons.calendar_month_rounded,
-          size: 16, // Smaller icon
-          color: cs.primary,
-        ),
-        const SizedBox(width: 6),
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              '$_mlDaysCount / 90 days',
-              style: TextStyle(
-                fontSize: 13, // Smaller text
-                fontWeight: FontWeight.bold,
-                color: cs.primary,
-              ),
-            ),
-            Text(
-              _mlReady ? 'ML Ready' : 'Training',
-              style: TextStyle(
-                fontSize: 11,
-                color: cs.onSurfaceVariant,
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(width: 10),
-        SizedBox(
-          width: 24, // Smaller loading circle
-          height: 24,
-          child: CircularProgressIndicator(
-            value: _mlProgress.clamp(0.0, 1.0),
-            strokeWidth: 3,
-            backgroundColor: cs.surfaceContainerHighest,
-          ),
-        ),
-      ],
-    ),
-  ),
-    child: _predLoading
-      ? const Padding(
-        padding: EdgeInsets.all(16),
-        child: Center(child: CircularProgressIndicator()))
-      : Column(
+                      _SectionCard(
+                        title: 'Predictions',
+                        icon: Icons.auto_awesome_rounded,
+                        headerTrailing: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(12),
+                            color: cs.surfaceContainerHighest.withValues(alpha: 0.45),
+                            border: Border.all(color: cs.primary.withValues(alpha: 0.15)),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.calendar_month_rounded, size: 16, color: cs.primary),
+                              const SizedBox(width: 6),
+                              Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text('$_mlDaysCount / 30 days',
+                                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: cs.primary)),
+                                  Text(_mlReady ? 'ML Ready' : 'Training',
+                                      style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                        child: _predLoading
+                            ? const Padding(padding: EdgeInsets.all(16), child: Center(child: CircularProgressIndicator()))
+                            : Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  // Method badge (info style)
-                                  if (_predMessage != null)
-                                    _InfoBadge(
-                                        message: _predMessage!,
-                                        isDark: isDark,
-                                        isError: false),
-                                  // Error badge (error style)
-                                  if (_predError != null)
-                                    _InfoBadge(
-                                        message: _predError!,
-                                        isDark: isDark,
-                                        isError: true),
-
-                                  // Prediction cards row
-                                  if (displayNextDay == null &&
-                                      displayNextWeek == null &&
-                                      displayNextMonth == null)
-                                    Text(
-                                      'Keep logging transactions to unlock AI predictions.',
-                                      style: TextStyle(color: t.hintColor),
-                                    )
+                                  if (_predMessage != null) _InfoBadge(message: _predMessage!, isDark: isDark, isError: false),
+                                  if (_predError != null) _InfoBadge(message: _predError!, isDark: isDark, isError: true),
+                                  if (displayNextDay == null && displayNextWeek == null && displayNextMonth == null)
+                                    Text('Keep logging transactions to unlock AI predictions.', style: TextStyle(color: t.hintColor))
                                   else
                                     Row(
                                       children: [
-                                        Expanded(
-                                          child: _MiniPredCard(
-                                            title: 'Tomorrow',
-                                            value: displayNextDay?.toString(),
-                                            icon: Icons.today_rounded,
-                                          ),
-                                        ),
+                                        Expanded(child: _MiniPredCard(title: 'Tomorrow', value: displayNextDay?.toString(), icon: Icons.today_rounded)),
                                         const SizedBox(width: 10),
-                                        Expanded(
-                                          child: _MiniPredCard(
-                                            title: '1 Week',
-                                            value: displayNextWeek?.toString(),
-                                            icon: Icons.date_range_rounded,
-                                          ),
-                                        ),
+                                        Expanded(child: _MiniPredCard(title: '1 Week', value: displayNextWeek?.toString(), icon: Icons.date_range_rounded)),
                                         const SizedBox(width: 10),
-                                        Expanded(
-                                          child: _MiniPredCard(
-                                            title: isMonthMode
-                                                ? 'This Month'
-                                                : 'Month',
-                                            value: displayNextMonth?.toString(),
-                                            icon: Icons.calendar_month_rounded,
-                                          ),
-                                        ),
+                                        Expanded(child: _MiniPredCard(title: isMonthMode ? 'This Month' : 'Month', value: displayNextMonth?.toString(), icon: Icons.calendar_month_rounded)),
                                       ],
                                     ),
-
-                                  // Confidence interval
-                                  if (displayLower != null &&
-                                      displayUpper != null) ...[
-                                    const SizedBox(height: 10),
-                                    _ConfidenceIntervalRow(
-                                      lower: displayLower,
-                                      upper: displayUpper,
+                                  const SizedBox(height: 16),
+                                  SizedBox(
+                                    width: double.infinity,
+                                    child: FilledButton.icon(
+                                      icon: const Icon(Icons.analytics_rounded),
+                                      label: const Text('More Details'),
+                                      onPressed: () async {
+                                        await Navigator.push(context, MaterialPageRoute(builder: (_) => const PredictionDetailsPage()));
+                                      },
                                     ),
-                                  ],
-
-                                  // Explainability panel
-                                  if (showExplain) ...[
-                                    const SizedBox(height: 16),
-                                    _ExplainabilityPanel(
-                                      explanationText: _predExplanationText,
-                                      featureImportances:
-                                          _predFeatureImportances,
-                                      weekendInfluence: _predWeekendInfluence,
-                                      categoryImpact: _predCategoryImpact,
-                                    ),
-                                  ],
-
-                                  // Model metrics (rendered once only)
-                                  if (_predictionMetrics.isNotEmpty) ...[
-                                    const SizedBox(height: 16),
-                                    _MetricsPanel(
-                                        metrics: _predictionMetrics),
-                                  ],
-
-                                  // Anomalies
-                                  if (showAnomalies) ...[
-                                    const SizedBox(height: 16),
-                                    _AnomalyPanel(
-                                        anomalies: _predAnomalies),
-                                  ],
-
-                                  // Monthly trend
-                                  if (showTrend) ...[
-                                    const SizedBox(height: 16),
-                                    _MonthlyTrendPanel(
-                                        trend: _predMonthlyTrend!),
-                                  ],
-
-                                  // Live Prediction Metrics
-                                  if (showLiveMetrics) ...[
-                                    const SizedBox(height: 16),
-                                    Container(
-                                      padding: const EdgeInsets.all(14),
-                                      decoration: BoxDecoration(
-                                        borderRadius:
-                                            BorderRadius.circular(16),
-                                        color: cs.surfaceContainerHighest
-                                            .withValues(alpha: 0.4),
-                                      ),
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          Text(
-                                            'Live Prediction Metrics',
-                                            style: TextStyle(
-                                              fontWeight: FontWeight.bold,
-                                              fontSize: 15,
-                                              color: cs.onSurface,
-                                            ),
-                                          ),
-                                          const SizedBox(height: 12),
-                                          _LiveMetricRow(
-                                            label: 'Spent So Far',
-                                            value: 'RM ${(_actualSpentSoFar ?? 0).toStringAsFixed(2)}',
-                                            valueColor: cs.onSurface,
-                                          ),
-                                          const SizedBox(height: 8),
-                                          _LiveMetricRow(
-                                            label: 'Predicted Remaining',
-                                            value: 'RM ${(_remainingPrediction ?? 0).toStringAsFixed(2)}',
-                                            valueColor: cs.onSurface,
-                                          ),
-                                          const SizedBox(height: 8),
-                                          _LiveMetricRow(
-                                            label: 'Month Progress',
-                                            value: '${(_forecastProgress ?? 0).toStringAsFixed(1)}%',
-                                            valueColor: cs.primary,
-                                          ),
-                                          if (_forecastProgress != null) ...[
-                                            const SizedBox(height: 10),
-                                            ClipRRect(
-                                              borderRadius:
-                                                  BorderRadius.circular(6),
-                                              child: LinearProgressIndicator(
-                                                value: ((_forecastProgress ?? 0) / 100)
-                                                    .clamp(0.0, 1.0),
-                                                minHeight: 7,
-                                                backgroundColor:
-                                                    cs.surfaceContainerHighest,
-                                                color: cs.primary,
-                                              ),
-                                            ),
-                                          ],
-                                        ],
-                                      ),
-                                    ),
-                                  ],
+                                  ),
                                 ],
                               ),
                       ),
                       const SizedBox(height: 16),
-
-                      // ── Balance Trend Chart ─────────────────────────────
                       _SectionCard(
                         title: 'Balance Trend',
                         icon: Icons.show_chart_rounded,
                         actionText: 'RM ${netBalance.toStringAsFixed(2)}',
                         child: Padding(
-                          padding:
-                              const EdgeInsets.only(top: 8.0, right: 16),
+                          padding: const EdgeInsets.only(top: 8.0, right: 16),
                           child: _BalanceTrendChart(
                             tx: _txs,
                             asDouble: _asDouble,
@@ -1192,60 +915,42 @@ int get _mlDaysCount {
                         ),
                       ),
                       const SizedBox(height: 16),
-
-                      // ── Top Expenses ────────────────────────────────────
                       _SectionCard(
                         title: 'Top Expenses',
                         icon: Icons.pie_chart_rounded,
                         child: _TopExpensesBars(
-                          top: top3
-                              .map((e) =>
-                                  MapEntry(_prettyCat(e.key), e.value))
-                              .toList(),
+                          top: top3.map((e) => MapEntry(_prettyCat(e.key), e.value)).toList(),
                           maxValue: top3.isEmpty ? 1 : top3.first.value,
                         ),
                       ),
                       const SizedBox(height: 16),
-
-                      // ── Cash Flow ───────────────────────────────────────
                       _SectionCard(
                         title: 'Cash Flow',
                         icon: Icons.swap_vert_rounded,
-                        child: _CashFlowBars(
-                            income: incomeTotal, expense: expenseTotal),
+                        child: _CashFlowBars(income: incomeTotal, expense: expenseTotal),
                       ),
                       const SizedBox(height: 16),
-
-                      // ── Monthly Targets ─────────────────────────────────
                       _SectionCard(
                         title: 'Monthly Targets',
                         icon: Icons.flag_rounded,
                         actionText: isMonthMode ? 'Edit' : null,
                         onAction: isMonthMode ? _openTargetsEditor : null,
                         child: !isMonthMode
-                            ? Text(
-                                'Targets are set monthly. Please select a specific month above.',
-                                style: TextStyle(color: t.hintColor),
-                              )
+                            ? Text('Targets are set monthly. Please select a specific month above.', style: TextStyle(color: t.hintColor))
                             : _targetsLoading
-                                ? const Center(
-                                    child: CircularProgressIndicator())
+                                ? const Center(child: CircularProgressIndicator())
                                 : _targetsError != null
-                                    ? Text(_targetsError!,
-                                        style: TextStyle(color: cs.error))
+                                    ? Text(_targetsError!, style: TextStyle(color: cs.error))
                                     : _TargetsList(
                                         monthlyBudget: _monthlyBudget,
                                         targetRmByCat: _targetRmByCat,
                                         rawPctByCat: _rawPctByCat,
                                         rawAmtByCat: _rawAmtByCat,
-                                        spentByCategory:
-                                            _spentByCategoryForMonth(monthTx),
+                                        spentByCategory: _spentByCategoryForMonth(monthTx),
                                         prettyCat: _prettyCat,
                                       ),
                       ),
                       const SizedBox(height: 16),
-
-                      // ── Recent Transactions ─────────────────────────────
                       _SectionCard(
                         title: 'Recent Transactions',
                         icon: Icons.history_rounded,
@@ -1263,7 +968,6 @@ int get _mlDaysCount {
     );
   }
 }
-
 // ═════════════════════════════════════════════════════════════════════════════
 // LIVE METRIC ROW
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1977,9 +1681,6 @@ class _MetricsPanel extends StatelessWidget {
           _metricRow('RMSE', m['rmse']),
           _metricRow('MAPE', '${m['mape']}%'),
           _metricRow('R² Score', m['r2']),
-          _metricRow('Baseline MAE', m['baseline_mae']),
-          _metricRow('CV Folds', m['cv_folds']),
-          _metricRow('Accepted', m['accepted']?.toString() ?? '-'),
         ],
       ),
     );
@@ -2425,22 +2126,36 @@ class _MiniPredCard extends StatelessWidget {
         children: [
           Icon(icon, size: 18, color: cs.onSurface),
           const SizedBox(height: 8),
-          Text(title,
+          
+          // Added FittedBox to the title just in case "This Month" is too wide
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: Text(
+              title,
               style: TextStyle(
                   color: cs.onSurfaceVariant,
                   fontSize: 11,
-                  fontWeight: FontWeight.w600)),
+                  fontWeight: FontWeight.w600),
+            ),
+          ),
+          
           const SizedBox(height: 2),
-          Text(
-            value == null
-                ? '-'
-                : 'RM ${double.tryParse(value!)?.toStringAsFixed(2) ?? value}',
-            style: TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.bold,
-                color: cs.onSurface),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
+          
+          // Added FittedBox here to shrink the currency text instead of cutting it off
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: Text(
+              value == null
+                  ? '-'
+                  : 'RM ${double.tryParse(value!)?.toStringAsFixed(2) ?? value}',
+              style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
+                  color: cs.onSurface),
+              maxLines: 1,
+            ),
           ),
         ],
       ),

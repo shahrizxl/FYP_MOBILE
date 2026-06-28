@@ -25,7 +25,7 @@ class _Hairline extends StatelessWidget {
   Widget build(BuildContext context) => Container(
         height: 0.5,
         margin: EdgeInsets.symmetric(horizontal: indent),
-        color:  Theme.of(context).dividerColor.withOpacity(0.5),
+        color: Theme.of(context).dividerColor.withOpacity(0.5),
       );
 }
 
@@ -42,7 +42,6 @@ class QuickAddTransactionPage extends StatefulWidget {
 
 class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
     with TickerProviderStateMixin {
-
   final ctrl      = TextEditingController();
   final nlp       = NlpService();
   final txService = TransactionService();
@@ -63,13 +62,6 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
   int     _retryCount    = 0;
   static const int _maxRetries = 2;
 
-  late AnimationController _pulseCtrl;
-  late Animation<double>   _pulseScale;
-  late Animation<double>   _pulseOpacity;
-
-  late AnimationController _breathCtrl;
-  late Animation<double>   _breathOpacity;
-
   final Map<String, IconData> categoryIcons = {
     'food'         : Icons.restaurant_rounded,
     'transport'    : Icons.directions_car_rounded,
@@ -82,6 +74,7 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
     'personal_care': Icons.spa_rounded,
     'pets'         : Icons.pets_rounded,
     'home'         : Icons.home_rounded,
+    'travel'       : Icons.flight_rounded,
     'income'       : Icons.attach_money_rounded,
     'other'        : Icons.category_rounded,
   };
@@ -91,21 +84,6 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
   @override
   void initState() {
     super.initState();
-
-    _pulseCtrl = AnimationController(
-        vsync: this, duration: const Duration(milliseconds: 1600))
-      ..repeat();
-    _pulseScale   = Tween<double>(begin: 1.0, end: 1.85).animate(
-        CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeOutCubic));
-    _pulseOpacity = Tween<double>(begin: 0.40, end: 0.0).animate(
-        CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeOutCubic));
-
-    _breathCtrl = AnimationController(
-        vsync: this, duration: const Duration(milliseconds: 3200))
-      ..repeat(reverse: true);
-    _breathOpacity = Tween<double>(begin: 0.04, end: 0.12).animate(
-        CurvedAnimation(parent: _breathCtrl, curve: Curves.easeInOut));
-
     _initSpeech();
   }
 
@@ -119,8 +97,7 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
     } catch (e) {
       _speechReady = false;
     }
- 
-    // FIX: Show clear message if permission was denied
+
     if (!_speechReady && mounted) {
       setState(() => error = 'Microphone permission denied. Enable it in Settings.');
     } else if (mounted) {
@@ -130,32 +107,29 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
 
   void _onSpeechStatus(String status) {
     if (!mounted) return;
-    // Both 'done' and 'notListening' mean the session ended
     if (status == 'done' || status == 'notListening') {
       setState(() => _isListening = false);
     }
   }
 
-void _onSpeechError(dynamic errorNotification) {
+  void _onSpeechError(dynamic errorNotification) {
     if (!mounted) return;
- 
+
     final errorMsg = errorNotification.errorMsg ?? errorNotification.toString();
- 
-    // FIX: These are NORMAL — do NOT show error UI for them
+
     const ignoredErrors = [
       'error_speech_timeout',
-      'error_no_match',        // user said nothing
-      'error_audio',           // brief mic interruption
+      'error_no_match',
+      'error_audio',
     ];
+    
     if (ignoredErrors.any((e) => errorMsg.contains(e))) {
       setState(() => _isListening = false);
       return;
     }
- 
-    // For real errors, stop and optionally retry once
+
     setState(() => _isListening = false);
- 
-    // Retry on network/recognizer errors (common on first use)
+
     if (_retryCount < _maxRetries &&
         (errorMsg.contains('error_network') ||
          errorMsg.contains('error_recognizer_busy'))) {
@@ -163,9 +137,8 @@ void _onSpeechError(dynamic errorNotification) {
       Future.delayed(const Duration(milliseconds: 500), _startListening);
       return;
     }
- 
+
     _retryCount = 0;
-    // Only show error for genuinely unexpected failures
     setState(() => error = 'Voice input failed. Please try again.');
   }
 
@@ -175,50 +148,45 @@ void _onSpeechError(dynamic errorNotification) {
       setState(() => error = 'Microphone not available.');
       return;
     }
- 
-    // FIX: Always stop any ongoing session before starting a new one
+
     if (_speech.isListening) {
       await _speech.stop();
-      await Future.delayed(const Duration(milliseconds: 200));
     }
- 
+
     _preSpeechText = ctrl.text.trim();
     setState(() { _isListening = true; error = null; });
- 
+
     await _speech.listen(
       listenMode:     stt.ListenMode.dictation,
       partialResults: true,
       listenFor:      const Duration(seconds: 30),
       pauseFor:       const Duration(seconds: 3),
       onResult:       _onSpeechResult,
-      // FIX: Set localeId explicitly to avoid wrong language on some devices
-      // localeId: 'en_US', // uncomment if needed
+      localeId:       'ms_MY', // 🔥 Set to Malay (Malaysia)
     );
   }
 
   void _onSpeechResult(dynamic result) {
     if (!mounted) return;
- 
+
     final spoken = (result.recognizedWords as String).trim();
     if (spoken.isEmpty) return;
- 
-    // FIX: Always combine base + current partial — never let partials stack
+
     final base    = _preSpeechText.isEmpty ? '' : '${_preSpeechText.trimRight()} ';
     final newText = '$base$spoken';
- 
+
     setState(() {
       ctrl.text      = newText;
       ctrl.selection = TextSelection.collapsed(offset: newText.length);
     });
- 
-    // FIX: On final result, advance the baseline so next partial doesn't repeat
+
     if (result.finalResult == true) {
       _preSpeechText = newText;
     }
   }
 
   // ── Stop Listening ─────────────────────────────────────────────────────────
- Future<void> _stopListening() async {
+  Future<void> _stopListening() async {
     if (_speech.isListening) {
       await _speech.stop();
     }
@@ -228,20 +196,18 @@ void _onSpeechError(dynamic errorNotification) {
 
   // ── Toggle Mic ─────────────────────────────────────────────────────────────
   Future<void> _toggleMic() async {
-      HapticFeedback.mediumImpact();
-      if (_isListening) {
-        await _stopListening();
-      } else {
-        _retryCount = 0; // reset retry count on fresh user tap
-        await _startListening();
-      }
+    HapticFeedback.mediumImpact();
+    if (_isListening) {
+      await _stopListening();
+    } else {
+      _retryCount = 0;
+      await _startListening();
     }
+  }
 
   @override
   void dispose() {
-    _pulseCtrl.dispose();
-    _breathCtrl.dispose();
-    _speech.cancel();   // fire-and-forget is fine here, no need for try/catch
+    _speech.cancel();
     ctrl.dispose();
     _scrollCtrl.dispose();
     super.dispose();
@@ -263,7 +229,6 @@ void _onSpeechError(dynamic errorNotification) {
   Future<void> sendMessage() async {
     if (_isListening) {
       await _stopListening();
-      await Future.delayed(const Duration(milliseconds: 100));
     }
     final text = ctrl.text.trim();
     if (text.isEmpty) { setState(() => error = 'Type or speak first.'); return; }
@@ -273,9 +238,7 @@ void _onSpeechError(dynamic errorNotification) {
       messages.add(ChatMsg(id: _nextId++, fromUser: true, text: text));
     });
     ctrl.text = '';
-    Future.delayed(const Duration(milliseconds: 100), () {
-      _scrollToBottom();
-    });
+    Future.delayed(const Duration(milliseconds: 100), _scrollToBottom);
 
     try {
       final res    = await nlp.analyze(text);
@@ -481,7 +444,7 @@ void _onSpeechError(dynamic errorNotification) {
             )),
             const SizedBox(height: 14),
             Text(
-              'Speak or type naturally.\nWe understand how you talk.',
+              'Speak or type naturally in English or Malay.\nWe understand how you talk.',
               textAlign: TextAlign.center,
               style: TextStyle(color: cs.onSurfaceVariant, fontSize: 14),
             ),
@@ -495,24 +458,12 @@ void _onSpeechError(dynamic errorNotification) {
                   ctrl.text = 'Nasi Lemak RM8';
                   setState(() {});
                 }),
-                _SuggestionPill('Grab RM15', Icons.directions_car, onTap: () {
-                  ctrl.text = 'Grab RM15';
+                _SuggestionPill('Minyak kereta RM50', Icons.directions_car, onTap: () {
+                  ctrl.text = 'Minyak kereta RM50';
                   setState(() {});
                 }),
                 _SuggestionPill('Coffee RM5', Icons.local_cafe, onTap: () {
                   ctrl.text = 'Coffee RM5';
-                  setState(() {});
-                }),
-                _SuggestionPill('Groceries RM120', Icons.shopping_bag, onTap: () {
-                  ctrl.text = 'Groceries RM120';
-                  setState(() {});
-                }),
-                _SuggestionPill('I spent RM25 on dinner', Icons.auto_awesome, onTap: () {
-                  ctrl.text = 'I spent RM25 on dinner';
-                  setState(() {});
-                }),
-                _SuggestionPill('Salary RM3000', Icons.attach_money, onTap: () {
-                  ctrl.text = 'Salary RM3000';
                   setState(() {});
                 }),
               ],
@@ -523,7 +474,6 @@ void _onSpeechError(dynamic errorNotification) {
     );
   }
 
-  // ── Clean Mic Button UI ────────────────────────────────────────────────────
   Widget _micButton() {
     final cs = Theme.of(context).colorScheme;
 
@@ -555,99 +505,94 @@ void _onSpeechError(dynamic errorNotification) {
     final confirmed = ctrl.text.trim();
     final hasText   = confirmed.isNotEmpty;
 
-    return ClipRect(
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-        child: Container(
-          decoration: BoxDecoration(
-            color: cs.surfaceContainerLowest.withOpacity(0.94),
-            border: Border(top: BorderSide(color: cs.outlineVariant.withOpacity(0.5), width: 0.5)),
-          ),
-          child: SafeArea(
-            top: false,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(12, 12, 12, 14),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  _micButton(),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color:        cs.surfaceContainerHighest.withOpacity(0.5),
-                        borderRadius: BorderRadius.circular(24),
-                        border: Border.all(
-                          color: _isListening ? cs.primary : cs.outlineVariant.withOpacity(0.5),
-                          width: 0.8,
-                        ),
-                      ),
-                      child: TextField(
-                        controller:      ctrl,
-                        minLines:        1,
-                        maxLines:        4,
-                        textInputAction: TextInputAction.send,
-                        onChanged:       (_) => setState(() {}),
-                        onSubmitted: (_) {
-                            if (loading) return;
-                            FocusScope.of(context).unfocus();
-                            sendMessage();
-                          },
-                        style: TextStyle(
-                            fontSize:   15,
-                            color:      cs.onSurface,
-                            fontWeight: FontWeight.w400,
-                            height:     1.45), 
-                        decoration: InputDecoration(
-                          hintText: _isListening
-                              ? 'Listening...'
-                              : 'Try: Nasi lemak RM8',
-                          hintStyle: TextStyle(
-                              color:      t.hintColor,
-                              fontSize:   15,
-                              fontWeight: FontWeight.w400), 
-                          border:         InputBorder.none,
-                          contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 20, vertical: 14),
-                        ),
-                      ),
+    return Container(
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerLowest.withOpacity(0.96), // Removed Blur for Performance
+        border: Border(top: BorderSide(color: cs.outlineVariant.withOpacity(0.5), width: 0.5)),
+      ),
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 12, 12, 14),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              _micButton(),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Container(
+                  decoration: BoxDecoration(
+                    color:        cs.surfaceContainerHighest.withOpacity(0.5),
+                    borderRadius: BorderRadius.circular(24),
+                    border: Border.all(
+                      color: _isListening ? cs.primary : cs.outlineVariant.withOpacity(0.5),
+                      width: 0.8,
                     ),
                   ),
-                  const SizedBox(width: 8),
-                  GestureDetector(
-                    onTap: (loading || !hasText) ? null : sendMessage,
-                    child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 250),
-                      curve:    Curves.easeOutBack,
-                      width:    48,
-                      height:   48,
-                      margin:   const EdgeInsets.only(bottom: 2),
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: hasText ? cs.primary : Colors.transparent,
-                        border: Border.all(
-                          color: hasText ? Colors.transparent : cs.outlineVariant.withOpacity(0.5),
-                          width: 0.8,
-                        ),
-                      ),
-                      child: Center(
-                        child: loading
-                            ? SizedBox(
-                                width:  18,
-                                height: 18,
-                                child: CircularProgressIndicator(
-                                    strokeWidth: 1.5,
-                                    color: cs.onSurfaceVariant.withOpacity(0.5)),
-                              )
-                            : Icon(Icons.arrow_upward_rounded,
-                                size:  20,
-                                color: hasText ? cs.onPrimary : t.hintColor),
-                      ),
+                  child: TextField(
+                    controller:      ctrl,
+                    minLines:        1,
+                    maxLines:        4,
+                    textInputAction: TextInputAction.send,
+                    onChanged:       (_) => setState(() {}),
+                    onSubmitted: (_) {
+                        if (loading) return;
+                        FocusScope.of(context).unfocus();
+                        sendMessage();
+                      },
+                    style: TextStyle(
+                        fontSize:   15,
+                        color:      cs.onSurface,
+                        fontWeight: FontWeight.w400,
+                        height:     1.45), 
+                    decoration: InputDecoration(
+                      hintText: _isListening
+                          ? 'Mendengar...'
+                          : 'Contoh: Nasi lemak RM8',
+                      hintStyle: TextStyle(
+                          color:      t.hintColor,
+                          fontSize:   15,
+                          fontWeight: FontWeight.w400), 
+                      border:         InputBorder.none,
+                      contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 20, vertical: 14),
                     ),
                   ),
-                ],
+                ),
               ),
-            ),
+              const SizedBox(width: 8),
+              GestureDetector(
+                onTap: (loading || !hasText) ? null : sendMessage,
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 250),
+                  curve:    Curves.easeOutBack,
+                  width:    48,
+                  height:   48,
+                  margin:   const EdgeInsets.only(bottom: 2),
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: hasText ? cs.primary : Colors.transparent,
+                    border: Border.all(
+                      color: hasText ? Colors.transparent : cs.outlineVariant.withOpacity(0.5),
+                      width: 0.8,
+                    ),
+                  ),
+                  child: Center(
+                    child: loading
+                        ? SizedBox(
+                            width:  18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                                strokeWidth: 1.5,
+                                color: cs.onSurfaceVariant.withOpacity(0.5)),
+                          )
+                        : Icon(Icons.arrow_upward_rounded,
+                            size:  20,
+                            color: hasText ? cs.onPrimary : t.hintColor),
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -689,19 +634,10 @@ void _onSpeechError(dynamic errorNotification) {
       backgroundColor: cs.surfaceContainerLowest,
       extendBodyBehindAppBar: true,
       appBar: AppBar(
-        backgroundColor: Colors.transparent,
+        backgroundColor: cs.surfaceContainerLowest.withOpacity(0.90), // Removed Blur
         elevation: 0,
-        flexibleSpace: ClipRect(
-          child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-            child: Container(
-              decoration: BoxDecoration(
-                color:  cs.surfaceContainerLowest.withOpacity(0.80),
-                border: Border(
-                    bottom: BorderSide(color: cs.outlineVariant.withOpacity(0.5), width: 0.5)),
-              ),
-            ),
-          ),
+        shape: Border(
+          bottom: BorderSide(color: cs.outlineVariant.withOpacity(0.5), width: 0.5)
         ),
         leading: IconButton(
           icon: Icon(Icons.arrow_back_ios_new_rounded,
@@ -862,7 +798,7 @@ class _UserBubble extends StatelessWidget {
 //  AI bubble
 // ─────────────────────────────────────────────────────────────────────────────
 class _AiBubble extends StatelessWidget {
-  final String                      text;
+  final String                    text;
   final List<Map<String, dynamic>>? extracted;
   final bool                        alreadySaved;
   final Map<String, IconData>       categoryIcons;
@@ -999,8 +935,8 @@ class _ConfirmButton extends StatelessWidget {
 //  Suggestion pill
 // ─────────────────────────────────────────────────────────────────────────────
 class _SuggestionPill extends StatelessWidget {
-  final String     label;
-  final IconData   icon;
+  final String    label;
+  final IconData  icon;
   final VoidCallback onTap;
   const _SuggestionPill(this.label, this.icon, {required this.onTap});
 
@@ -1051,7 +987,7 @@ class ChatMsg {
 //  EDITABLE TRANSACTION CARD
 // ─────────────────────────────────────────────────────────────────────────────
 class EditableTransactionCard extends StatefulWidget {
-  final Map<String, dynamic>           data;
+  final Map<String, dynamic>          data;
   final Map<String, IconData>          categoryIcons;
   final Function(Map<String, dynamic>) onChanged;
 
@@ -1259,8 +1195,11 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
                         width: 75,
                         child: TextField(
                           controller:   _amtCtrl,
-                          keyboardType: const TextInputType.numberWithOptions(
-                              decimal: true),
+                          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                          // 🔥 FIX: Added Input Formatter so users can't type invalid decimals like '12..50'
+                          inputFormatters: [
+                            FilteringTextInputFormatter.allow(RegExp(r'^\d+\.?\d{0,2}')),
+                          ],
                           textAlign: TextAlign.right,
                           onChanged:  (_) => _notify(),
                           cursorColor:  cs.primary,
