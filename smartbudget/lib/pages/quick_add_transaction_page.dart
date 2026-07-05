@@ -17,10 +17,12 @@ String formatAmount(double amt) =>
 // ─────────────────────────────────────────────────────────────────────────────
 //  Currency / number-word normalization
 //  Converts spoken forms like "five ringgit", "rm five", "lima ringgit",
-//  "twenty three ringgit" into the "RM23" style your NLP already expects.
-//  This is a *lightweight* 0-100 lookup — it is not a general number parser.
-//  Anything more complex (hundreds, decimals spoken as words, etc.) should be
-//  handled server-side in the NLP service, where it's easier to iterate on.
+//  "dua ratus ribu ringgit", "lima ringgit lima puluh sen" into the
+//  "RM23" / "RM5.50" style your NLP already expects.
+//  Covers English + Malay number words up to hundred-thousands, plus
+//  sen/cents. Not a general-purpose number parser (no millions, no spoken
+//  decimals like "point five") — that level of coverage is better handled
+//  server-side in the NLP service where it's easier to iterate on.
 // ─────────────────────────────────────────────────────────────────────────────
 class CurrencyNormalizer {
   static const Map<String, int> _enOnes = {
@@ -43,11 +45,12 @@ class CurrencyNormalizer {
   // Malay teens: "dua belas" (12) ... "sembilan belas" (19)
   // Malay tens: "dua puluh" (20) ... "sembilan puluh" (90)
   // Malay hundreds/thousands: "seratus" (100, irregular), "dua ratus" (200),
-  // "seribu" (1000, irregular), "dua ribu" (2000).
+  // "seribu" (1000, irregular), "dua ribu" (2000), "dua ratus ribu"
+  // (200,000 — hundreds combine with "ribu" too, this is the bit that was
+  // previously broken).
+  static const List<String> _connectors = ['dan', 'and'];
 
-  /// Parses a 0-99 chunk starting at [start]. Used as a building block for
-  /// hundreds/thousands so "two hundred fifty three" / "dua ratus lima
-  /// puluh tiga" resolve correctly.
+  /// Parses a 0-99 chunk starting at [start]. Building block for hundreds.
   static ({int? value, int consumed}) _parseUnder100(
       List<String> tokens, int start) {
     if (start >= tokens.length) return (value: null, consumed: 0);
@@ -92,75 +95,85 @@ class CurrencyNormalizer {
     return (value: null, consumed: 0);
   }
 
-  /// Full number-word parser: handles hundreds/thousands on top of
-  /// _parseUnder100, for both English ("two thousand three hundred fifty",
-  /// "one hundred") and Malay ("dua ribu tiga ratus lima puluh", "seratus",
-  /// "seribu" — note the irregular "se-" forms which mean "one hundred" /
-  /// "one thousand", NOT "satu ratus" / "satu ribu").
+  /// Parses a 0-999 chunk (hundreds + tens/ones), e.g. "two hundred fifty
+  /// three", "dua ratus lima puluh tiga", "seratus". This is used both on
+  /// its own AND as the multiplier in front of "thousand"/"ribu", which is
+  /// what makes "dua ratus ribu" (200,000) resolve correctly — previously
+  /// only a bare 0-99 chunk was allowed before "ribu", so anything with a
+  /// "ratus" in front of "ribu" silently failed to match.
+  static ({int? value, int consumed}) _parseUnder1000(
+      List<String> tokens, int start) {
+    if (start >= tokens.length) return (value: null, consumed: 0);
+    var i = start;
+    var total = 0;
+    var matched = false;
+
+    final w = tokens[i].toLowerCase();
+    if (w == 'seratus') {
+      total += 100;
+      i += 1;
+      matched = true;
+    } else {
+      final under100 = _parseUnder100(tokens, i);
+      if (under100.value != null &&
+          under100.value! < 10 &&
+          i + under100.consumed < tokens.length) {
+        final suffix = tokens[i + under100.consumed].toLowerCase();
+        if (suffix == 'hundred' || suffix == 'ratus') {
+          total += under100.value! * 100;
+          i += under100.consumed + 1;
+          matched = true;
+        }
+      }
+    }
+
+    final rest = _parseUnder100(tokens, i);
+    if (rest.value != null) {
+      total += rest.value!;
+      i += rest.consumed;
+      matched = true;
+    }
+
+    if (!matched) return (value: null, consumed: 0);
+    return (value: total, consumed: i - start);
+  }
+
+  /// Full number-word parser: thousands (built on _parseUnder1000, so
+  /// "dua ratus ribu" / "two hundred thousand" both work) plus a trailing
+  /// 0-999 remainder, e.g. "dua ribu tiga ratus lima puluh" (2350),
+  /// "seribu" (1000), "seratus" (100). Handles the irregular Malay "se-"
+  /// forms ("seratus" = one hundred, "seribu" = one thousand — never
+  /// "satu ratus"/"satu ribu").
   static ({int? value, int consumed}) _parseNumberWords(
       List<String> tokens, int start) {
     if (start >= tokens.length) return (value: null, consumed: 0);
 
-    var total = 0;
     var i = start;
+    var total = 0;
     var matchedAny = false;
 
-    // --- thousands part ---
+    // --- thousands part (built on a full 0-999 chunk) ---
     var thousandsVal = 0;
-    final w = tokens[i].toLowerCase();
-    if (w == 'seribu') {
+    if (tokens[i].toLowerCase() == 'seribu') {
       thousandsVal = 1;
       i += 1;
       matchedAny = true;
     } else {
-      final under100 = _parseUnder100(tokens, i);
-      if (under100.value != null &&
-          i + under100.consumed < tokens.length &&
-          tokens[i + under100.consumed].toLowerCase() == 'thousand') {
-        thousandsVal = under100.value!;
-        i += under100.consumed + 1;
-        matchedAny = true;
-      } else if (under100.value != null &&
-          i + under100.consumed < tokens.length &&
-          tokens[i + under100.consumed].toLowerCase() == 'ribu') {
-        thousandsVal = under100.value!;
-        i += under100.consumed + 1;
-        matchedAny = true;
-      }
-    }
-    total += thousandsVal * 1000;
-
-    // --- hundreds part ---
-    var hundredsVal = 0;
-    if (i < tokens.length) {
-      final w2 = tokens[i].toLowerCase();
-      if (w2 == 'seratus') {
-        hundredsVal = 1;
-        i += 1;
-        matchedAny = true;
-      } else {
-        final under100 = _parseUnder100(tokens, i);
-        if (under100.value != null &&
-            under100.value! < 10 &&
-            i + under100.consumed < tokens.length &&
-            tokens[i + under100.consumed].toLowerCase() == 'hundred') {
-          hundredsVal = under100.value!;
-          i += under100.consumed + 1;
-          matchedAny = true;
-        } else if (under100.value != null &&
-            under100.value! < 10 &&
-            i + under100.consumed < tokens.length &&
-            tokens[i + under100.consumed].toLowerCase() == 'ratus') {
-          hundredsVal = under100.value!;
-          i += under100.consumed + 1;
+      final under1000 = _parseUnder1000(tokens, i);
+      if (under1000.value != null &&
+          i + under1000.consumed < tokens.length) {
+        final suffix = tokens[i + under1000.consumed].toLowerCase();
+        if (suffix == 'thousand' || suffix == 'ribu') {
+          thousandsVal = under1000.value!;
+          i += under1000.consumed + 1;
           matchedAny = true;
         }
       }
     }
-    total += hundredsVal * 100;
+    total += thousandsVal * 1000;
 
-    // --- remaining tens/ones part ---
-    final rest = _parseUnder100(tokens, i);
+    // --- remaining 0-999 part ---
+    final rest = _parseUnder1000(tokens, i);
     if (rest.value != null) {
       total += rest.value!;
       i += rest.consumed;
@@ -171,14 +184,47 @@ class CurrencyNormalizer {
     return (value: total, consumed: i - start);
   }
 
+  /// Parses a cents/sen amount: numeric ("50 sen") or word-based
+  /// ("lima puluh sen", "fifty sen"). Cents only ever need 0-99, so this
+  /// rides on _parseUnder100 rather than the full number parser.
+  static ({int? value, int consumed}) _parseCents(
+      List<String> tokens, int start) {
+    if (start >= tokens.length) return (value: null, consumed: 0);
+
+    final numMatch = RegExp(r'^\d{1,2}$').firstMatch(tokens[start]);
+    if (numMatch != null &&
+        start + 1 < tokens.length &&
+        tokens[start + 1].toLowerCase() == 'sen') {
+      return (value: int.parse(tokens[start]), consumed: 2);
+    }
+
+    final parsed = _parseUnder100(tokens, start);
+    if (parsed.value != null &&
+        start + parsed.consumed < tokens.length &&
+        tokens[start + parsed.consumed].toLowerCase() == 'sen') {
+      return (value: parsed.value, consumed: parsed.consumed + 1);
+    }
+
+    return (value: null, consumed: 0);
+  }
+
+  static int _skipConnector(List<String> tokens, int i) {
+    if (i < tokens.length && _connectors.contains(tokens[i].toLowerCase())) {
+      return i + 1;
+    }
+    return i;
+  }
+
+  static String _padCents(int v) => v.toString().padLeft(2, '0');
+
   /// Normalizes spoken currency phrases into "RM<amount>" tokens, e.g.:
-  ///   "coffee five ringgit"      -> "coffee RM5"
-  ///   "rm five"                  -> "RM5"
-  ///   "twenty three ringgit"     -> "RM23"
-  ///   "lima ringgit"             -> "RM5"
-  ///   "dua puluh tiga ringgit"   -> "RM23"
+  ///   "coffee five ringgit"          -> "coffee RM5"
+  ///   "rm five"                      -> "RM5"
+  ///   "dua ratus ribu ringgit"       -> "RM200000"
+  ///   "lima ringgit lima puluh sen"  -> "RM5.50"
+  ///   "50 sen"                       -> "RM0.50"
   /// Numeric forms like "RM5", "5 RM", "5.50 ringgit" are also normalized to
-  /// "RM5" / "RM5.50" so the NLP always sees a consistent pattern.
+  /// a consistent "RM<amount>" pattern.
   static String normalize(String input) {
     var text = input;
 
@@ -193,34 +239,73 @@ class CurrencyNormalizer {
       (m) => 'RM${m.group(1)}',
     );
 
-    // Word-number forms: walk tokens looking for "<number words> ringgit"
-    // or "rm <number words>".
     final tokens = text.split(RegExp(r'\s+'));
     final out = <String>[];
     var i = 0;
     while (i < tokens.length) {
       final lower = tokens[i].toLowerCase();
 
-      // "rm <words>"
+      // Case: an already-numeric "RM5" (from the regex pass above) that
+      // might still have spoken cents trailing it, e.g. "RM5 lima puluh sen".
+      final rmNumeric = RegExp(r'^RM(\d+)$').firstMatch(tokens[i]);
+      if (rmNumeric != null) {
+        final next = _skipConnector(tokens, i + 1);
+        final cents = _parseCents(tokens, next);
+        if (cents.value != null) {
+          out.add('RM${rmNumeric.group(1)}.${_padCents(cents.value!)}');
+          i = next + cents.consumed;
+          continue;
+        }
+        out.add(tokens[i]);
+        i++;
+        continue;
+      }
+
+      // "rm <words>" [dan/and <cents> sen]
       if (lower == 'rm' && i + 1 < tokens.length) {
         final parsed = _parseNumberWords(tokens, i + 1);
         if (parsed.value != null) {
+          final afterAmount = i + 1 + parsed.consumed;
+          final next = _skipConnector(tokens, afterAmount);
+          final cents = _parseCents(tokens, next);
+          if (cents.value != null) {
+            out.add('RM${parsed.value}.${_padCents(cents.value!)}');
+            i = next + cents.consumed;
+            continue;
+          }
           out.add('RM${parsed.value}');
-          i += 1 + parsed.consumed;
+          i = afterAmount;
           continue;
         }
       }
 
-      // "<words> ringgit"
+      // "<words> ringgit" [dan/and <cents> sen]
       final parsed = _parseNumberWords(tokens, i);
       if (parsed.value != null) {
         final after = i + parsed.consumed;
         if (after < tokens.length &&
             tokens[after].toLowerCase() == 'ringgit') {
+          final afterRinggit = after + 1;
+          final next = _skipConnector(tokens, afterRinggit);
+          final cents = _parseCents(tokens, next);
+          if (cents.value != null) {
+            out.add('RM${parsed.value}.${_padCents(cents.value!)}');
+            i = next + cents.consumed;
+            continue;
+          }
           out.add('RM${parsed.value}');
-          i = after + 1;
+          i = afterRinggit;
           continue;
         }
+      }
+
+      // Standalone cents with no ringgit part at all, e.g. "50 sen" or
+      // "lima puluh sen" on its own -> RM0.50.
+      final centsOnly = _parseCents(tokens, i);
+      if (centsOnly.value != null) {
+        out.add('RM0.${_padCents(centsOnly.value!)}');
+        i += centsOnly.consumed;
+        continue;
       }
 
       out.add(tokens[i]);
@@ -269,6 +354,11 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
   final List<ChatMsg> messages    = [];
   final Set<int>      savedMsgIds = {};
   int                 _nextId     = 1;
+  // Stable id attached to each extracted transaction map (see sendMessage),
+  // used as a widget key so removing one card doesn't cause Flutter to
+  // reuse a stateful card's controller/state across different data when
+  // list indices shift.
+  int                 _nextLocalTxId = 1;
   final _scrollCtrl = ScrollController();
 
   // Speech
@@ -519,6 +609,12 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
     try {
       final res    = await nlp.analyze(text);
       final parsed = List<Map<String, dynamic>>.from(res);
+      // Tag each parsed transaction with a stable local id (not shown to
+      // the user, stripped before saving) so cards can be safely removed
+      // from the middle of the list without Flutter reusing state.
+      for (final r in parsed) {
+        r['_localTxId'] = _nextLocalTxId++;
+      }
       if (!mounted) return;
       setState(() {
         messages.add(ChatMsg(
@@ -650,6 +746,21 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
     );
   }
 
+  // Removes a single extracted transaction from an AI reply's list, so an
+  // over-eager NLP result (e.g. it split one sentence into two
+  // transactions) can be corrected before saving. Once a message has been
+  // saved this is disabled (see alreadySaved handling in _AiBubble).
+  void _removeExtractedAt(int msgId, int index) {
+    HapticFeedback.lightImpact();
+    setState(() {
+      final msg = messages.firstWhere((m) => m.id == msgId);
+      if (msg.extracted == null || index < 0 || index >= msg.extracted!.length) {
+        return;
+      }
+      msg.extracted!.removeAt(index);
+    });
+  }
+
   Widget _bubble(ChatMsg m) {
     final isUser       = m.fromUser;
     final alreadySaved = savedMsgIds.contains(m.id);
@@ -672,6 +783,7 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
                   categoryIcons: categoryIcons,
                   loading:       loading,
                   onSave: () => saveFromReply(m.id, m.extracted!),
+                  onRemoveAt: (idx) => _removeExtractedAt(m.id, idx),
                 ),
         ),
       ),
@@ -1112,6 +1224,7 @@ class _AiBubble extends StatelessWidget {
   final Map<String, IconData>       categoryIcons;
   final bool                        loading;
   final VoidCallback                onSave;
+  final void Function(int index)    onRemoveAt;
 
   const _AiBubble({
     required this.msgId,
@@ -1121,6 +1234,7 @@ class _AiBubble extends StatelessWidget {
     required this.categoryIcons,
     required this.loading,
     required this.onSave,
+    required this.onRemoveAt,
   });
 
   bool get hasExtracted => extracted != null && extracted!.isNotEmpty;
@@ -1163,12 +1277,27 @@ class _AiBubble extends StatelessWidget {
           )),
           if (hasExtracted) ...[
             const SizedBox(height: 14),
+            if (extracted!.length > 1 && !alreadySaved)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Text(
+                  '${extracted!.length} transactions found — remove any that don\'t belong.',
+                  style: TextStyle(
+                      fontSize: 11.5,
+                      color: cs.onSurfaceVariant,
+                      fontWeight: FontWeight.w400),
+                ),
+              ),
             ...extracted!.asMap().entries.map((e) =>
               EditableTransactionCard(
-                key:           ValueKey('${msgId}_${e.key}'),
+                // Keyed by a stable per-transaction id (not the list index)
+                // so removing a card from the middle doesn't make Flutter
+                // reuse another card's controller/state for different data.
+                key:           ValueKey('${msgId}_${e.value['_localTxId'] ?? e.key}'),
                 data:          e.value,
                 categoryIcons: categoryIcons,
                 onChanged:     (u) => extracted![e.key] = u,
+                onRemove:      alreadySaved ? null : () => onRemoveAt(e.key),
               ),
             ),
             const SizedBox(height: 16),
@@ -1176,6 +1305,15 @@ class _AiBubble extends StatelessWidget {
               saved:   alreadySaved,
               loading: loading,
               onTap:   alreadySaved || loading ? null : onSave,
+            ),
+          ] else if (extracted != null && extracted!.isEmpty) ...[
+            const SizedBox(height: 10),
+            Text(
+              'All transactions removed. Nothing to save.',
+              style: TextStyle(
+                  fontSize: 13,
+                  color: cs.onSurfaceVariant,
+                  fontWeight: FontWeight.w400),
             ),
           ],
         ],
@@ -1313,12 +1451,15 @@ class EditableTransactionCard extends StatefulWidget {
   final Map<String, dynamic>          data;
   final Map<String, IconData>          categoryIcons;
   final Function(Map<String, dynamic>) onChanged;
+  // Null hides the remove button entirely (e.g. once the message is saved).
+  final VoidCallback?                  onRemove;
 
   const EditableTransactionCard({
     super.key,
     required this.data,
     required this.categoryIcons,
     required this.onChanged,
+    this.onRemove,
   });
 
   @override
@@ -1397,8 +1538,12 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
     final validCat = widget.categoryIcons.containsKey(_selectedCat)
         ? _selectedCat : 'other';
 
-    return Container(
-      margin: const EdgeInsets.only(top: 10),
+    return Padding(
+      padding: const EdgeInsets.only(top: 10),
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Container(
       decoration: BoxDecoration(
         color:        cs.surfaceContainerLowest,
         borderRadius: BorderRadius.circular(14),
@@ -1586,6 +1731,38 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
               ],
             ),
           ),
+        ],
+      ),
+          ),
+          // Remove button — lets you drop a transaction the NLP shouldn't
+          // have split out (e.g. one sentence parsed into two entries)
+          // before confirming. Hidden once the message has been saved.
+          if (widget.onRemove != null)
+            Positioned(
+              right: -6,
+              top: -6,
+              child: GestureDetector(
+                onTap: widget.onRemove,
+                child: Container(
+                  width: 22,
+                  height: 22,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: cs.surface,
+                    border: Border.all(color: cs.outlineVariant, width: 0.8),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Theme.of(context).shadowColor.withOpacity(0.06),
+                        blurRadius: 4,
+                        offset: const Offset(0, 1),
+                      ),
+                    ],
+                  ),
+                  child: Icon(Icons.close_rounded,
+                      size: 13, color: cs.onSurfaceVariant),
+                ),
+              ),
+            ),
         ],
       ),
     );
