@@ -15,6 +15,223 @@ String formatAmount(double amt) =>
     amt % 1 == 0 ? amt.toInt().toString() : amt.toStringAsFixed(2);
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  Currency / number-word normalization
+//  Converts spoken forms like "five ringgit", "rm five", "lima ringgit",
+//  "twenty three ringgit" into the "RM23" style your NLP already expects.
+//  This is a *lightweight* 0-100 lookup — it is not a general number parser.
+//  Anything more complex (hundreds, decimals spoken as words, etc.) should be
+//  handled server-side in the NLP service, where it's easier to iterate on.
+// ─────────────────────────────────────────────────────────────────────────────
+class CurrencyNormalizer {
+  static const Map<String, int> _enOnes = {
+    'zero': 0, 'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
+    'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
+    'eleven': 11, 'twelve': 12, 'thirteen': 13, 'fourteen': 14,
+    'fifteen': 15, 'sixteen': 16, 'seventeen': 17, 'eighteen': 18,
+    'nineteen': 19,
+  };
+  static const Map<String, int> _enTens = {
+    'twenty': 20, 'thirty': 30, 'forty': 40, 'fifty': 50,
+    'sixty': 60, 'seventy': 70, 'eighty': 80, 'ninety': 90,
+  };
+
+  static const Map<String, int> _msOnes = {
+    'kosong': 0, 'satu': 1, 'dua': 2, 'tiga': 3, 'empat': 4,
+    'lima': 5, 'enam': 6, 'tujuh': 7, 'lapan': 8, 'sembilan': 9,
+    'sepuluh': 10, 'sebelas': 11,
+  };
+  // Malay teens: "dua belas" (12) ... "sembilan belas" (19)
+  // Malay tens: "dua puluh" (20) ... "sembilan puluh" (90)
+  // Malay hundreds/thousands: "seratus" (100, irregular), "dua ratus" (200),
+  // "seribu" (1000, irregular), "dua ribu" (2000).
+
+  /// Parses a 0-99 chunk starting at [start]. Used as a building block for
+  /// hundreds/thousands so "two hundred fifty three" / "dua ratus lima
+  /// puluh tiga" resolve correctly.
+  static ({int? value, int consumed}) _parseUnder100(
+      List<String> tokens, int start) {
+    if (start >= tokens.length) return (value: null, consumed: 0);
+    final w = tokens[start].toLowerCase();
+
+    if (_enTens.containsKey(w)) {
+      var total = _enTens[w]!;
+      var consumed = 1;
+      if (start + 1 < tokens.length &&
+          _enOnes.containsKey(tokens[start + 1].toLowerCase()) &&
+          _enOnes[tokens[start + 1].toLowerCase()]! < 10) {
+        total += _enOnes[tokens[start + 1].toLowerCase()]!;
+        consumed = 2;
+      }
+      return (value: total, consumed: consumed);
+    }
+    if (_enOnes.containsKey(w)) {
+      return (value: _enOnes[w]!, consumed: 1);
+    }
+
+    if (_msOnes.containsKey(w) &&
+        start + 1 < tokens.length &&
+        tokens[start + 1].toLowerCase() == 'puluh') {
+      var total = _msOnes[w]! * 10;
+      var consumed = 2;
+      if (start + 2 < tokens.length &&
+          _msOnes.containsKey(tokens[start + 2].toLowerCase())) {
+        total += _msOnes[tokens[start + 2].toLowerCase()]!;
+        consumed = 3;
+      }
+      return (value: total, consumed: consumed);
+    }
+    if (_msOnes.containsKey(w) &&
+        start + 1 < tokens.length &&
+        tokens[start + 1].toLowerCase() == 'belas') {
+      return (value: _msOnes[w]! + 10, consumed: 2);
+    }
+    if (_msOnes.containsKey(w)) {
+      return (value: _msOnes[w]!, consumed: 1);
+    }
+
+    return (value: null, consumed: 0);
+  }
+
+  /// Full number-word parser: handles hundreds/thousands on top of
+  /// _parseUnder100, for both English ("two thousand three hundred fifty",
+  /// "one hundred") and Malay ("dua ribu tiga ratus lima puluh", "seratus",
+  /// "seribu" — note the irregular "se-" forms which mean "one hundred" /
+  /// "one thousand", NOT "satu ratus" / "satu ribu").
+  static ({int? value, int consumed}) _parseNumberWords(
+      List<String> tokens, int start) {
+    if (start >= tokens.length) return (value: null, consumed: 0);
+
+    var total = 0;
+    var i = start;
+    var matchedAny = false;
+
+    // --- thousands part ---
+    var thousandsVal = 0;
+    final w = tokens[i].toLowerCase();
+    if (w == 'seribu') {
+      thousandsVal = 1;
+      i += 1;
+      matchedAny = true;
+    } else {
+      final under100 = _parseUnder100(tokens, i);
+      if (under100.value != null &&
+          i + under100.consumed < tokens.length &&
+          tokens[i + under100.consumed].toLowerCase() == 'thousand') {
+        thousandsVal = under100.value!;
+        i += under100.consumed + 1;
+        matchedAny = true;
+      } else if (under100.value != null &&
+          i + under100.consumed < tokens.length &&
+          tokens[i + under100.consumed].toLowerCase() == 'ribu') {
+        thousandsVal = under100.value!;
+        i += under100.consumed + 1;
+        matchedAny = true;
+      }
+    }
+    total += thousandsVal * 1000;
+
+    // --- hundreds part ---
+    var hundredsVal = 0;
+    if (i < tokens.length) {
+      final w2 = tokens[i].toLowerCase();
+      if (w2 == 'seratus') {
+        hundredsVal = 1;
+        i += 1;
+        matchedAny = true;
+      } else {
+        final under100 = _parseUnder100(tokens, i);
+        if (under100.value != null &&
+            under100.value! < 10 &&
+            i + under100.consumed < tokens.length &&
+            tokens[i + under100.consumed].toLowerCase() == 'hundred') {
+          hundredsVal = under100.value!;
+          i += under100.consumed + 1;
+          matchedAny = true;
+        } else if (under100.value != null &&
+            under100.value! < 10 &&
+            i + under100.consumed < tokens.length &&
+            tokens[i + under100.consumed].toLowerCase() == 'ratus') {
+          hundredsVal = under100.value!;
+          i += under100.consumed + 1;
+          matchedAny = true;
+        }
+      }
+    }
+    total += hundredsVal * 100;
+
+    // --- remaining tens/ones part ---
+    final rest = _parseUnder100(tokens, i);
+    if (rest.value != null) {
+      total += rest.value!;
+      i += rest.consumed;
+      matchedAny = true;
+    }
+
+    if (!matchedAny) return (value: null, consumed: 0);
+    return (value: total, consumed: i - start);
+  }
+
+  /// Normalizes spoken currency phrases into "RM<amount>" tokens, e.g.:
+  ///   "coffee five ringgit"      -> "coffee RM5"
+  ///   "rm five"                  -> "RM5"
+  ///   "twenty three ringgit"     -> "RM23"
+  ///   "lima ringgit"             -> "RM5"
+  ///   "dua puluh tiga ringgit"   -> "RM23"
+  /// Numeric forms like "RM5", "5 RM", "5.50 ringgit" are also normalized to
+  /// "RM5" / "RM5.50" so the NLP always sees a consistent pattern.
+  static String normalize(String input) {
+    var text = input;
+
+    // Numeric-first forms: "5 ringgit", "5 rm", "5.50 ringgit"
+    text = text.replaceAllMapped(
+      RegExp(r'(\d+(?:\.\d+)?)\s*(ringgit|rm)\b', caseSensitive: false),
+      (m) => 'RM${m.group(1)}',
+    );
+    // "rm 5" / "rm5" already close to desired form; just tighten spacing.
+    text = text.replaceAllMapped(
+      RegExp(r'\brm\s*(\d+(?:\.\d+)?)\b', caseSensitive: false),
+      (m) => 'RM${m.group(1)}',
+    );
+
+    // Word-number forms: walk tokens looking for "<number words> ringgit"
+    // or "rm <number words>".
+    final tokens = text.split(RegExp(r'\s+'));
+    final out = <String>[];
+    var i = 0;
+    while (i < tokens.length) {
+      final lower = tokens[i].toLowerCase();
+
+      // "rm <words>"
+      if (lower == 'rm' && i + 1 < tokens.length) {
+        final parsed = _parseNumberWords(tokens, i + 1);
+        if (parsed.value != null) {
+          out.add('RM${parsed.value}');
+          i += 1 + parsed.consumed;
+          continue;
+        }
+      }
+
+      // "<words> ringgit"
+      final parsed = _parseNumberWords(tokens, i);
+      if (parsed.value != null) {
+        final after = i + parsed.consumed;
+        if (after < tokens.length &&
+            tokens[after].toLowerCase() == 'ringgit') {
+          out.add('RM${parsed.value}');
+          i = after + 1;
+          continue;
+        }
+      }
+
+      out.add(tokens[i]);
+      i++;
+    }
+
+    return out.join(' ');
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  Hairline divider
 // ─────────────────────────────────────────────────────────────────────────────
 class _Hairline extends StatelessWidget {
@@ -27,116 +244,6 @@ class _Hairline extends StatelessWidget {
         margin: EdgeInsets.symmetric(horizontal: indent),
         color: Theme.of(context).dividerColor.withOpacity(0.5),
       );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  MALAY NUMBER WORD -> DIGIT CONVERTER
-// ─────────────────────────────────────────────────────────────────────────────
-//
-// On-device speech recognizers occasionally spell numbers out instead of
-// using digits (e.g. "lima puluh ribu" instead of "50000"). This utility
-// finds runs of Malay number-words in recognized text and converts them
-// to digits, so downstream NLP parsing always sees numeric amounts.
-//
-// Handles: units (satu..sembilan), belas (teens), puluh (tens),
-// ratus (hundreds), ribu (thousands), juta (millions), and the "se-"
-// prefix forms (sepuluh, sebelas, seratus, seribu, sejuta).
-class MalayNumberConverter {
-  static const Map<String, int> _units = {
-    'kosong': 0,
-    'satu': 1,
-    'dua': 2,
-    'tiga': 3,
-    'empat': 4,
-    'lima': 5,
-    'enam': 6,
-    'tujuh': 7,
-    'lapan': 8,
-    'sembilan': 9,
-    'se': 1,
-  };
-
-  static const Set<String> _multiplierWords = {'puluh', 'ratus', 'ribu', 'juta'};
-  static const String _teenWord = 'belas';
-
-  static const Map<String, int> _multiplierValues = {
-    'puluh': 10,
-    'ratus': 100,
-    'ribu': 1000,
-    'juta': 1000000,
-  };
-
-  /// Splits compound words like "seratus", "seribu", "sejuta", "sepuluh",
-  /// "sebelas" into "se" + the base word, so the tokenizer can treat them
-  /// uniformly (se = 1, then multiplied/added by the following word).
-  static String _splitSePrefix(String text) {
-    final pattern = RegExp(
-      r'\bse(ratus|ribu|juta|puluh|belas)\b',
-      caseSensitive: false,
-    );
-    return text.replaceAllMapped(pattern, (m) => 'se ${m.group(1)}');
-  }
-
-  /// Returns true if a lowercase word is part of a Malay number expression.
-  static bool _isNumberWord(String w) =>
-      _units.containsKey(w) || _multiplierWords.contains(w) || w == _teenWord;
-
-  /// Converts a contiguous list of number-word tokens into an integer.
-  static int _resolve(List<String> tokens) {
-    int total = 0;
-    int current = 0;
-
-    for (final tok in tokens) {
-      if (_units.containsKey(tok)) {
-        current += _units[tok]!;
-      } else if (tok == _teenWord) {
-        current += 10;
-      } else if (_multiplierWords.contains(tok)) {
-        final mult = _multiplierValues[tok]!;
-        if (mult >= 1000) {
-          total += (current == 0 ? 1 : current) * mult;
-          current = 0;
-        } else {
-          current = (current == 0 ? 1 : current) * mult;
-        }
-      }
-    }
-    return total + current;
-  }
-
-  /// Scans free text, replaces runs of Malay number-words with digits.
-  /// Non-number words (including "ringgit", "rm", item names) are left
-  /// untouched and act as boundaries between separate number runs.
-  static String normalize(String input) {
-    final prepped = _splitSePrefix(input);
-    final wordSplit = RegExp(r'(\s+)');
-    final parts = prepped.split(wordSplit);
-
-    final output = <String>[];
-    List<String> buffer = [];
-
-    void flushBuffer() {
-      if (buffer.isEmpty) return;
-      output.add(_resolve(buffer.map((w) => w.toLowerCase()).toList()).toString());
-      buffer = [];
-    }
-
-    for (final part in prepped.split(' ')) {
-      if (part.trim().isEmpty) {
-        continue;
-      }
-      final clean = part.toLowerCase().replaceAll(RegExp(r'[^a-z]'), '');
-      if (_isNumberWord(clean)) {
-        buffer.add(clean);
-      } else {
-        flushBuffer();
-        output.add(part);
-      }
-    }
-    flushBuffer();
-
-    return output.join(' ');
-  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -171,6 +278,17 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
   String  _preSpeechText = '';
   int     _retryCount    = 0;
   static const int _maxRetries = 2;
+
+  // 🔥 FIX: guards against a stale onResult callback landing after we've
+  // already stopped listening (e.g. user pressed Enter mid-speech). Without
+  // this, speech_to_text's final callback can re-populate the text field
+  // right after sendMessage() cleared it.
+  bool _ignoreSpeechResults = false;
+
+  // Locale resolved from the device rather than hardcoded.
+  String _enLocaleId = 'en_US';
+  String _msLocaleId = 'ms_MY';
+  bool   _useMalay    = false;
 
   final Map<String, IconData> categoryIcons = {
     'food'         : Icons.restaurant_rounded,
@@ -208,10 +326,27 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
       _speechReady = false;
     }
 
+    if (_speechReady) {
+      await _resolveLocales();
+    }
+
     if (!_speechReady && mounted) {
       setState(() => error = 'Microphone permission denied. Enable it in Settings.');
     } else if (mounted) {
       setState(() {});
+    }
+  }
+
+  Future<void> _resolveLocales() async {
+    try {
+      final locales = await _speech.locales();
+      for (final l in locales) {
+        final id = l.localeId.toLowerCase();
+        if (id.startsWith('en')) _enLocaleId = l.localeId;
+        if (id.startsWith('ms')) _msLocaleId = l.localeId;
+      }
+    } catch (_) {
+      // Keep defaults.
     }
   }
 
@@ -244,7 +379,12 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
         (errorMsg.contains('error_network') ||
          errorMsg.contains('error_recognizer_busy'))) {
       _retryCount++;
-      Future.delayed(const Duration(milliseconds: 500), _startListening);
+      Future.delayed(const Duration(milliseconds: 500), () {
+        // 🔥 FIX: don't auto-retry into a listening session if the user (or
+        // dispose()) has since asked us to stop / ignore results.
+        if (_ignoreSpeechResults) return;
+        _startListening();
+      });
       return;
     }
 
@@ -254,15 +394,21 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
 
   // ── Start Listening ────────────────────────────────────────────────────────
   Future<void> _startListening() async {
+    if (!mounted) return;
     if (!_speechReady) {
       setState(() => error = 'Microphone not available.');
       return;
     }
+    // 🔥 FIX: guards a fast double-tap on the mic button. Without this,
+    // two overlapping calls can both capture _preSpeechText before either
+    // has updated _isListening, so the second call captures a stale value.
+    if (_isListening) return;
 
     if (_speech.isListening) {
       await _speech.stop();
     }
 
+    _ignoreSpeechResults = false;
     _preSpeechText = ctrl.text.trim();
     setState(() { _isListening = true; error = null; });
 
@@ -272,22 +418,17 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
       listenFor:      const Duration(seconds: 30),
       pauseFor:       const Duration(seconds: 3),
       onResult:       _onSpeechResult,
-      // 🔥 Malaysian English handles code-switched Malay/English speech
-      // ("Nasi lemak RM8", "Minyak kereta lima puluh") in a single pass
-      // far better than a pure ms_MY or en_US model does.
-      localeId:       'en_MY',
+      localeId:       _useMalay ? _msLocaleId : _enLocaleId,
     );
   }
 
   void _onSpeechResult(dynamic result) {
+    // 🔥 FIX: drop any callback that arrives after we've asked to stop.
+    if (_ignoreSpeechResults) return;
     if (!mounted) return;
 
-    final rawSpoken = (result.recognizedWords as String).trim();
-    if (rawSpoken.isEmpty) return;
-
-    // 🔥 Convert any spelled-out Malay number words (ratus, ribu, puluh,
-    // belas, se- prefixes) into digits before they hit the text field.
-    final spoken = MalayNumberConverter.normalize(rawSpoken);
+    final spoken = (result.recognizedWords as String).trim();
+    if (spoken.isEmpty) return;
 
     final base    = _preSpeechText.isEmpty ? '' : '${_preSpeechText.trimRight()} ';
     final newText = '$base$spoken';
@@ -304,6 +445,11 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
 
   // ── Stop Listening ─────────────────────────────────────────────────────────
   Future<void> _stopListening() async {
+    // 🔥 FIX: set this *before* awaiting stop(), so the trailing final
+    // onResult callback that speech_to_text fires during/after stop() is
+    // ignored instead of overwriting text we've already cleared/sent.
+    _ignoreSpeechResults = true;
+
     if (_speech.isListening) {
       await _speech.stop();
     }
@@ -322,8 +468,17 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
     }
   }
 
+  // ── Toggle Speech Language ─────────────────────────────────────────────────
+  void _toggleSpeechLocale() {
+    HapticFeedback.selectionClick();
+    setState(() => _useMalay = !_useMalay);
+  }
+
   @override
   void dispose() {
+    // 🔥 FIX: stop any in-flight retry/callback from touching state after
+    // this widget is gone.
+    _ignoreSpeechResults = true;
     _speech.cancel();
     ctrl.dispose();
     _scrollCtrl.dispose();
@@ -347,12 +502,16 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
     if (_isListening) {
       await _stopListening();
     }
-    final text = ctrl.text.trim();
-    if (text.isEmpty) { setState(() => error = 'Type or speak first.'); return; }
+    // 🔥 FIX: normalize spoken/typed currency phrases ("five ringgit",
+    // "lima ringgit", "rm five") into the "RM<amount>" pattern the NLP
+    // service already understands, before we ever send it off.
+    final rawText = ctrl.text.trim();
+    if (rawText.isEmpty) { setState(() => error = 'Type or speak first.'); return; }
+    final text = CurrencyNormalizer.normalize(rawText);
 
     setState(() {
       error = null; loading = true;
-      messages.add(ChatMsg(id: _nextId++, fromUser: true, text: text));
+      messages.add(ChatMsg(id: _nextId++, fromUser: true, text: rawText));
     });
     ctrl.text = '';
     Future.delayed(const Duration(milliseconds: 100), _scrollToBottom);
@@ -496,6 +655,7 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
     final alreadySaved = savedMsgIds.contains(m.id);
 
     return Padding(
+      key: ValueKey(m.id),
       padding: const EdgeInsets.only(bottom: 14),
       child: Align(
         alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
@@ -505,6 +665,7 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
           child: isUser
               ? _UserBubble(text: m.text)
               : _AiBubble(
+                  msgId:         m.id,
                   text:          m.text,
                   extracted:     m.extracted,
                   alreadySaved:  alreadySaved,
@@ -594,25 +755,54 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
   Widget _micButton() {
     final cs = Theme.of(context).colorScheme;
 
-    return GestureDetector(
-      onTap: loading ? null : _toggleMic,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 250),
-        width: 48,
-        height: 48,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          color: _isListening ? cs.primary : cs.surfaceContainerHighest,
-          border: Border.all(
-            color: _isListening ? cs.primary : cs.outlineVariant.withOpacity(0.5),
-            width: 0.8,
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        GestureDetector(
+          onTap: loading ? null : _toggleMic,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 250),
+            width: 48,
+            height: 48,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: _isListening ? cs.primary : cs.surfaceContainerHighest,
+              border: Border.all(
+                color: _isListening ? cs.primary : cs.outlineVariant.withOpacity(0.5),
+                width: 0.8,
+              ),
+            ),
+            child: Icon(
+              _isListening ? Icons.mic : Icons.mic_none,
+              color: _isListening ? cs.onPrimary : cs.onSurfaceVariant,
+            ),
           ),
         ),
-        child: Icon(
-          _isListening ? Icons.mic : Icons.mic_none,
-          color: _isListening ? cs.onPrimary : cs.onSurfaceVariant,
+        Positioned(
+          right: -2,
+          top: -2,
+          child: GestureDetector(
+            onTap: (loading || _isListening) ? null : _toggleSpeechLocale,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: cs.surface,
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: cs.outlineVariant, width: 0.8),
+              ),
+              child: Text(
+                _useMalay ? 'BM' : 'EN',
+                style: TextStyle(
+                  fontSize:   9,
+                  fontWeight: FontWeight.w700,
+                  color:      cs.onSurface,
+                  letterSpacing: 0.3,
+                ),
+              ),
+            ),
+          ),
         ),
-      ),
+      ],
     );
   }
 
@@ -664,8 +854,8 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
                         height:     1.45),
                     decoration: InputDecoration(
                       hintText: _isListening
-                          ? 'Mendengar...'
-                          : 'Contoh: Nasi lemak RM8',
+                          ? (_useMalay ? 'Mendengar...' : 'Listening...')
+                          : (_useMalay ? 'Contoh: Nasi lemak RM8' : 'e.g. Coffee RM8'),
                       hintStyle: TextStyle(
                           color:      t.hintColor,
                           fontSize:   15,
@@ -915,7 +1105,8 @@ class _UserBubble extends StatelessWidget {
 //  AI bubble
 // ─────────────────────────────────────────────────────────────────────────────
 class _AiBubble extends StatelessWidget {
-  final String                    text;
+  final int                         msgId;
+  final String                      text;
   final List<Map<String, dynamic>>? extracted;
   final bool                        alreadySaved;
   final Map<String, IconData>       categoryIcons;
@@ -923,6 +1114,7 @@ class _AiBubble extends StatelessWidget {
   final VoidCallback                onSave;
 
   const _AiBubble({
+    required this.msgId,
     required this.text,
     required this.extracted,
     required this.alreadySaved,
@@ -973,6 +1165,7 @@ class _AiBubble extends StatelessWidget {
             const SizedBox(height: 14),
             ...extracted!.asMap().entries.map((e) =>
               EditableTransactionCard(
+                key:           ValueKey('${msgId}_${e.key}'),
                 data:          e.value,
                 categoryIcons: categoryIcons,
                 onChanged:     (u) => extracted![e.key] = u,
@@ -1101,6 +1294,19 @@ class ChatMsg {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  Decimal amount formatter — rejects an invalid edit instead of mangling it
+// ─────────────────────────────────────────────────────────────────────────────
+class _DecimalInputFormatter extends TextInputFormatter {
+  @override
+  TextEditingValue formatEditUpdate(
+      TextEditingValue oldValue, TextEditingValue newValue) {
+    if (newValue.text.isEmpty) return newValue;
+    if (RegExp(r'^\d+\.?\d{0,2}$').hasMatch(newValue.text)) return newValue;
+    return oldValue;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  EDITABLE TRANSACTION CARD
 // ─────────────────────────────────────────────────────────────────────────────
 class EditableTransactionCard extends StatefulWidget {
@@ -1128,8 +1334,11 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
   @override
   void initState() {
     super.initState();
-    _amtCtrl = TextEditingController(
-        text: widget.data['amount']?.toString() ?? '0');
+    final rawAmt = widget.data['amount'];
+    final numAmt = rawAmt is num
+        ? rawAmt.toDouble()
+        : double.tryParse(rawAmt?.toString().replaceAll(',', '') ?? '') ?? 0.0;
+    _amtCtrl = TextEditingController(text: formatAmount(numAmt));
     _selectedCat = widget.data['category'] ?? 'other';
     try {
       _selectedDate = widget.data['date'] != null &&
@@ -1173,7 +1382,7 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
       lastDate:    DateTime.now().add(const Duration(days: 365)),
     );
     if (picked != null) {
-      setState(() => _selectedDate = picked);
+      _selectedDate = picked;
       _notify();
     }
   }
@@ -1310,9 +1519,7 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
                         child: TextField(
                           controller:   _amtCtrl,
                           keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                          inputFormatters: [
-                            FilteringTextInputFormatter.allow(RegExp(r'^\d+\.?\d{0,2}')),
-                          ],
+                          inputFormatters: [_DecimalInputFormatter()],
                           textAlign: TextAlign.right,
                           onChanged:  (_) => _notify(),
                           cursorColor:  cs.primary,
