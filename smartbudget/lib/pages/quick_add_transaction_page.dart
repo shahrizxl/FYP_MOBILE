@@ -23,6 +23,19 @@ String formatAmount(double amt) =>
 //  sen/cents. Not a general-purpose number parser (no millions, no spoken
 //  decimals like "point five") — that level of coverage is better handled
 //  server-side in the NLP service where it's easier to iterate on.
+//
+//  🔥 FIX (see below): two bugs previously existed here —
+//  1) "10 ringgit 20 cent" wasn't recognized as one amount because the
+//     cents parser only accepted the word "sen", not "cent"/"cents".
+//  2) "dua ratus 3 ringgit" / "dua ribu 3 ringgit" resolved to the wrong
+//     number (23 / 203 instead of 203 / 2003) because the very first
+//     regex pass in normalize() greedily rewrote any "<digit> ringgit"
+//     substring into "RM<digit>" BEFORE tokenization, stealing the
+//     trailing digit away from the preceding magnitude word ("ratus"/
+//     "ribu") that it was supposed to combine with. On top of that,
+//     _parseUnder100 had no fallback for a bare digit token, so even if
+//     the digit had reached the word-parser untouched it still wouldn't
+//     have combined with "ratus"/"ribu".
 // ─────────────────────────────────────────────────────────────────────────────
 class CurrencyNormalizer {
   static const Map<String, int> _enOnes = {
@@ -49,6 +62,18 @@ class CurrencyNormalizer {
   // (200,000 — hundreds combine with "ribu" too, this is the bit that was
   // previously broken).
   static const List<String> _connectors = ['dan', 'and'];
+
+  // 🔥 FIX: words for which a trailing bare digit ("3", "20", etc.) should
+  // NOT be pulled into the early "<digit> ringgit/rm" numeric regex, since
+  // that digit actually belongs to a number-word phrase that precedes it
+  // (e.g. "dua ratus 3 ringgit" — the "3" completes "dua ratus 3" = 203,
+  // it is not a standalone "3 ringgit").
+  static const String _magnitudeWords =
+      r'ratus|ribu|seratus|seribu|puluh|belas|hundred|thousand';
+
+  // 🔥 FIX: accept "cent"/"cents" as synonyms for "sen" so English-phrased
+  // cents ("10 ringgit 20 cent") are recognized just like Malay ones.
+  static const Set<String> _centWords = {'sen', 'cent', 'cents'};
 
   /// Parses a 0-99 chunk starting at [start]. Building block for hundreds.
   static ({int? value, int consumed}) _parseUnder100(
@@ -90,6 +115,16 @@ class CurrencyNormalizer {
     }
     if (_msOnes.containsKey(w)) {
       return (value: _msOnes[w]!, consumed: 1);
+    }
+
+    // 🔥 FIX: bare digit fallback, e.g. a numeral "3" or "20" typed/spoken
+    // instead of a number word. Needed so mixed phrases like
+    // "dua ratus 3 ringgit" (dua ratus = 200, then a bare "3") and
+    // "dua ribu 3" (dua ribu = 2000, then a bare "3") resolve to 203 and
+    // 2003 respectively instead of losing the magnitude word entirely.
+    final digitMatch = RegExp(r'^\d{1,2}$').firstMatch(w);
+    if (digitMatch != null) {
+      return (value: int.parse(w), consumed: 1);
     }
 
     return (value: null, consumed: 0);
@@ -187,6 +222,11 @@ class CurrencyNormalizer {
   /// Parses a cents/sen amount: numeric ("50 sen") or word-based
   /// ("lima puluh sen", "fifty sen"). Cents only ever need 0-99, so this
   /// rides on _parseUnder100 rather than the full number parser.
+  /// 🔥 FIX: now also accepts "cent"/"cents" (English) in addition to
+  /// "sen" (Malay), via _centWords, so "10 ringgit 20 cent" is recognized
+  /// as a single RM10.20 amount instead of leaving "20 cent" dangling as
+  /// unparsed text (which previously caused the NLP service to split it
+  /// into a second, bogus transaction).
   static ({int? value, int consumed}) _parseCents(
       List<String> tokens, int start) {
     if (start >= tokens.length) return (value: null, consumed: 0);
@@ -194,14 +234,14 @@ class CurrencyNormalizer {
     final numMatch = RegExp(r'^\d{1,2}$').firstMatch(tokens[start]);
     if (numMatch != null &&
         start + 1 < tokens.length &&
-        tokens[start + 1].toLowerCase() == 'sen') {
+        _centWords.contains(tokens[start + 1].toLowerCase())) {
       return (value: int.parse(tokens[start]), consumed: 2);
     }
 
     final parsed = _parseUnder100(tokens, start);
     if (parsed.value != null &&
         start + parsed.consumed < tokens.length &&
-        tokens[start + parsed.consumed].toLowerCase() == 'sen') {
+        _centWords.contains(tokens[start + parsed.consumed].toLowerCase())) {
       return (value: parsed.value, consumed: parsed.consumed + 1);
     }
 
@@ -223,14 +263,29 @@ class CurrencyNormalizer {
   ///   "dua ratus ribu ringgit"       -> "RM200000"
   ///   "lima ringgit lima puluh sen"  -> "RM5.50"
   ///   "50 sen"                       -> "RM0.50"
+  ///   "10 ringgit 20 cent"           -> "RM10.20"
+  ///   "dua ratus 3 ringgit"          -> "RM203"
+  ///   "dua ribu 3 ringgit"           -> "RM2003"
   /// Numeric forms like "RM5", "5 RM", "5.50 ringgit" are also normalized to
   /// a consistent "RM<amount>" pattern.
   static String normalize(String input) {
     var text = input;
 
     // Numeric-first forms: "5 ringgit", "5 rm", "5.50 ringgit"
+    // 🔥 FIX: guard with a negative lookbehind so a bare digit that is
+    // actually the tail end of a preceding number-word phrase (e.g. the
+    // "3" in "dua ratus 3 ringgit" or "dua ribu 3 ringgit") is NOT stolen
+    // into its own "RM3" here. Without this guard the regex would rewrite
+    // "dua ratus 3 ringgit" -> "dua ratus RM3", stranding "dua ratus" as
+    // plain text and leaving only the wrong "RM3" — which is how you'd
+    // end up with a spurious 23-style result downstream. Leaving the digit
+    // untouched lets the tokenized word-parser below combine it correctly
+    // with "ratus"/"ribu" instead.
     text = text.replaceAllMapped(
-      RegExp(r'(\d+(?:\.\d+)?)\s*(ringgit|rm)\b', caseSensitive: false),
+      RegExp(
+        r'(?<!\b(?:' + _magnitudeWords + r')\s)(\d+(?:\.\d+)?)\s*(ringgit|rm)\b',
+        caseSensitive: false,
+      ),
       (m) => 'RM${m.group(1)}',
     );
     // "rm 5" / "rm5" already close to desired form; just tighten spacing.
@@ -261,7 +316,7 @@ class CurrencyNormalizer {
         continue;
       }
 
-      // "rm <words>" [dan/and <cents> sen]
+      // "rm <words>" [dan/and <cents> sen/cent]
       if (lower == 'rm' && i + 1 < tokens.length) {
         final parsed = _parseNumberWords(tokens, i + 1);
         if (parsed.value != null) {
@@ -279,7 +334,7 @@ class CurrencyNormalizer {
         }
       }
 
-      // "<words> ringgit" [dan/and <cents> sen]
+      // "<words> ringgit" [dan/and <cents> sen/cent]
       final parsed = _parseNumberWords(tokens, i);
       if (parsed.value != null) {
         final after = i + parsed.consumed;
@@ -299,8 +354,8 @@ class CurrencyNormalizer {
         }
       }
 
-      // Standalone cents with no ringgit part at all, e.g. "50 sen" or
-      // "lima puluh sen" on its own -> RM0.50.
+      // Standalone cents with no ringgit part at all, e.g. "50 sen",
+      // "50 cent", or "lima puluh sen" on its own -> RM0.50.
       final centsOnly = _parseCents(tokens, i);
       if (centsOnly.value != null) {
         out.add('RM0.${_padCents(centsOnly.value!)}');
