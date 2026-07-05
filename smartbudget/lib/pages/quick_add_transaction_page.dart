@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:math' as math;
-import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -13,363 +12,6 @@ import '../services/globals.dart';
 
 String formatAmount(double amt) =>
     amt % 1 == 0 ? amt.toInt().toString() : amt.toStringAsFixed(2);
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  Currency / number-word normalization
-//  Converts spoken forms like "five ringgit", "rm five", "lima ringgit",
-//  "dua ratus ribu ringgit", "lima ringgit lima puluh sen" into the
-//  "RM23" / "RM5.50" style your NLP already expects.
-//  Covers English + Malay number words up to hundred-thousands, plus
-//  sen/cents. Not a general-purpose number parser (no millions, no spoken
-//  decimals like "point five") — that level of coverage is better handled
-//  server-side in the NLP service where it's easier to iterate on.
-//
-//  🔥 FIX (see below): two bugs previously existed here —
-//  1) "10 ringgit 20 cent" wasn't recognized as one amount because the
-//     cents parser only accepted the word "sen", not "cent"/"cents".
-//  2) "dua ratus 3 ringgit" / "dua ribu 3 ringgit" resolved to the wrong
-//     number (23 / 203 instead of 203 / 2003) because the very first
-//     regex pass in normalize() greedily rewrote any "<digit> ringgit"
-//     substring into "RM<digit>" BEFORE tokenization, stealing the
-//     trailing digit away from the preceding magnitude word ("ratus"/
-//     "ribu") that it was supposed to combine with. On top of that,
-//     _parseUnder100 had no fallback for a bare digit token, so even if
-//     the digit had reached the word-parser untouched it still wouldn't
-//     have combined with "ratus"/"ribu".
-// ─────────────────────────────────────────────────────────────────────────────
-class CurrencyNormalizer {
-  static const Map<String, int> _enOnes = {
-    'zero': 0, 'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
-    'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
-    'eleven': 11, 'twelve': 12, 'thirteen': 13, 'fourteen': 14,
-    'fifteen': 15, 'sixteen': 16, 'seventeen': 17, 'eighteen': 18,
-    'nineteen': 19,
-  };
-  static const Map<String, int> _enTens = {
-    'twenty': 20, 'thirty': 30, 'forty': 40, 'fifty': 50,
-    'sixty': 60, 'seventy': 70, 'eighty': 80, 'ninety': 90,
-  };
-
-  static const Map<String, int> _msOnes = {
-    'kosong': 0, 'satu': 1, 'dua': 2, 'tiga': 3, 'empat': 4,
-    'lima': 5, 'enam': 6, 'tujuh': 7, 'lapan': 8, 'sembilan': 9,
-    'sepuluh': 10, 'sebelas': 11,
-  };
-  // Malay teens: "dua belas" (12) ... "sembilan belas" (19)
-  // Malay tens: "dua puluh" (20) ... "sembilan puluh" (90)
-  // Malay hundreds/thousands: "seratus" (100, irregular), "dua ratus" (200),
-  // "seribu" (1000, irregular), "dua ribu" (2000), "dua ratus ribu"
-  // (200,000 — hundreds combine with "ribu" too, this is the bit that was
-  // previously broken).
-  static const List<String> _connectors = ['dan', 'and'];
-
-  // 🔥 FIX: words for which a trailing bare digit ("3", "20", etc.) should
-  // NOT be pulled into the early "<digit> ringgit/rm" numeric regex, since
-  // that digit actually belongs to a number-word phrase that precedes it
-  // (e.g. "dua ratus 3 ringgit" — the "3" completes "dua ratus 3" = 203,
-  // it is not a standalone "3 ringgit").
-  static const String _magnitudeWords =
-      r'ratus|ribu|seratus|seribu|puluh|belas|hundred|thousand';
-
-  // 🔥 FIX: accept "cent"/"cents" as synonyms for "sen" so English-phrased
-  // cents ("10 ringgit 20 cent") are recognized just like Malay ones.
-  static const Set<String> _centWords = {'sen', 'cent', 'cents'};
-
-  /// Parses a 0-99 chunk starting at [start]. Building block for hundreds.
-  static ({int? value, int consumed}) _parseUnder100(
-      List<String> tokens, int start) {
-    if (start >= tokens.length) return (value: null, consumed: 0);
-    final w = tokens[start].toLowerCase();
-
-    if (_enTens.containsKey(w)) {
-      var total = _enTens[w]!;
-      var consumed = 1;
-      if (start + 1 < tokens.length &&
-          _enOnes.containsKey(tokens[start + 1].toLowerCase()) &&
-          _enOnes[tokens[start + 1].toLowerCase()]! < 10) {
-        total += _enOnes[tokens[start + 1].toLowerCase()]!;
-        consumed = 2;
-      }
-      return (value: total, consumed: consumed);
-    }
-    if (_enOnes.containsKey(w)) {
-      return (value: _enOnes[w]!, consumed: 1);
-    }
-
-    if (_msOnes.containsKey(w) &&
-        start + 1 < tokens.length &&
-        tokens[start + 1].toLowerCase() == 'puluh') {
-      var total = _msOnes[w]! * 10;
-      var consumed = 2;
-      if (start + 2 < tokens.length &&
-          _msOnes.containsKey(tokens[start + 2].toLowerCase())) {
-        total += _msOnes[tokens[start + 2].toLowerCase()]!;
-        consumed = 3;
-      }
-      return (value: total, consumed: consumed);
-    }
-    if (_msOnes.containsKey(w) &&
-        start + 1 < tokens.length &&
-        tokens[start + 1].toLowerCase() == 'belas') {
-      return (value: _msOnes[w]! + 10, consumed: 2);
-    }
-    if (_msOnes.containsKey(w)) {
-      return (value: _msOnes[w]!, consumed: 1);
-    }
-
-    // 🔥 FIX: bare digit fallback, e.g. a numeral "3" or "20" typed/spoken
-    // instead of a number word. Needed so mixed phrases like
-    // "dua ratus 3 ringgit" (dua ratus = 200, then a bare "3") and
-    // "dua ribu 3" (dua ribu = 2000, then a bare "3") resolve to 203 and
-    // 2003 respectively instead of losing the magnitude word entirely.
-    final digitMatch = RegExp(r'^\d{1,2}$').firstMatch(w);
-    if (digitMatch != null) {
-      return (value: int.parse(w), consumed: 1);
-    }
-
-    return (value: null, consumed: 0);
-  }
-
-  /// Parses a 0-999 chunk (hundreds + tens/ones), e.g. "two hundred fifty
-  /// three", "dua ratus lima puluh tiga", "seratus". This is used both on
-  /// its own AND as the multiplier in front of "thousand"/"ribu", which is
-  /// what makes "dua ratus ribu" (200,000) resolve correctly — previously
-  /// only a bare 0-99 chunk was allowed before "ribu", so anything with a
-  /// "ratus" in front of "ribu" silently failed to match.
-  static ({int? value, int consumed}) _parseUnder1000(
-      List<String> tokens, int start) {
-    if (start >= tokens.length) return (value: null, consumed: 0);
-    var i = start;
-    var total = 0;
-    var matched = false;
-
-    final w = tokens[i].toLowerCase();
-    if (w == 'seratus') {
-      total += 100;
-      i += 1;
-      matched = true;
-    } else {
-      final under100 = _parseUnder100(tokens, i);
-      if (under100.value != null &&
-          under100.value! < 10 &&
-          i + under100.consumed < tokens.length) {
-        final suffix = tokens[i + under100.consumed].toLowerCase();
-        if (suffix == 'hundred' || suffix == 'ratus') {
-          total += under100.value! * 100;
-          i += under100.consumed + 1;
-          matched = true;
-        }
-      }
-    }
-
-    final rest = _parseUnder100(tokens, i);
-    if (rest.value != null) {
-      total += rest.value!;
-      i += rest.consumed;
-      matched = true;
-    }
-
-    if (!matched) return (value: null, consumed: 0);
-    return (value: total, consumed: i - start);
-  }
-
-  /// Full number-word parser: thousands (built on _parseUnder1000, so
-  /// "dua ratus ribu" / "two hundred thousand" both work) plus a trailing
-  /// 0-999 remainder, e.g. "dua ribu tiga ratus lima puluh" (2350),
-  /// "seribu" (1000), "seratus" (100). Handles the irregular Malay "se-"
-  /// forms ("seratus" = one hundred, "seribu" = one thousand — never
-  /// "satu ratus"/"satu ribu").
-  static ({int? value, int consumed}) _parseNumberWords(
-      List<String> tokens, int start) {
-    if (start >= tokens.length) return (value: null, consumed: 0);
-
-    var i = start;
-    var total = 0;
-    var matchedAny = false;
-
-    // --- thousands part (built on a full 0-999 chunk) ---
-    var thousandsVal = 0;
-    if (tokens[i].toLowerCase() == 'seribu') {
-      thousandsVal = 1;
-      i += 1;
-      matchedAny = true;
-    } else {
-      final under1000 = _parseUnder1000(tokens, i);
-      if (under1000.value != null &&
-          i + under1000.consumed < tokens.length) {
-        final suffix = tokens[i + under1000.consumed].toLowerCase();
-        if (suffix == 'thousand' || suffix == 'ribu') {
-          thousandsVal = under1000.value!;
-          i += under1000.consumed + 1;
-          matchedAny = true;
-        }
-      }
-    }
-    total += thousandsVal * 1000;
-
-    // --- remaining 0-999 part ---
-    final rest = _parseUnder1000(tokens, i);
-    if (rest.value != null) {
-      total += rest.value!;
-      i += rest.consumed;
-      matchedAny = true;
-    }
-
-    if (!matchedAny) return (value: null, consumed: 0);
-    return (value: total, consumed: i - start);
-  }
-
-  /// Parses a cents/sen amount: numeric ("50 sen") or word-based
-  /// ("lima puluh sen", "fifty sen"). Cents only ever need 0-99, so this
-  /// rides on _parseUnder100 rather than the full number parser.
-  /// 🔥 FIX: now also accepts "cent"/"cents" (English) in addition to
-  /// "sen" (Malay), via _centWords, so "10 ringgit 20 cent" is recognized
-  /// as a single RM10.20 amount instead of leaving "20 cent" dangling as
-  /// unparsed text (which previously caused the NLP service to split it
-  /// into a second, bogus transaction).
-  static ({int? value, int consumed}) _parseCents(
-      List<String> tokens, int start) {
-    if (start >= tokens.length) return (value: null, consumed: 0);
-
-    final numMatch = RegExp(r'^\d{1,2}$').firstMatch(tokens[start]);
-    if (numMatch != null &&
-        start + 1 < tokens.length &&
-        _centWords.contains(tokens[start + 1].toLowerCase())) {
-      return (value: int.parse(tokens[start]), consumed: 2);
-    }
-
-    final parsed = _parseUnder100(tokens, start);
-    if (parsed.value != null &&
-        start + parsed.consumed < tokens.length &&
-        _centWords.contains(tokens[start + parsed.consumed].toLowerCase())) {
-      return (value: parsed.value, consumed: parsed.consumed + 1);
-    }
-
-    return (value: null, consumed: 0);
-  }
-
-  static int _skipConnector(List<String> tokens, int i) {
-    if (i < tokens.length && _connectors.contains(tokens[i].toLowerCase())) {
-      return i + 1;
-    }
-    return i;
-  }
-
-  static String _padCents(int v) => v.toString().padLeft(2, '0');
-
-  /// Normalizes spoken currency phrases into "RM<amount>" tokens, e.g.:
-  ///   "coffee five ringgit"          -> "coffee RM5"
-  ///   "rm five"                      -> "RM5"
-  ///   "dua ratus ribu ringgit"       -> "RM200000"
-  ///   "lima ringgit lima puluh sen"  -> "RM5.50"
-  ///   "50 sen"                       -> "RM0.50"
-  ///   "10 ringgit 20 cent"           -> "RM10.20"
-  ///   "dua ratus 3 ringgit"          -> "RM203"
-  ///   "dua ribu 3 ringgit"           -> "RM2003"
-  /// Numeric forms like "RM5", "5 RM", "5.50 ringgit" are also normalized to
-  /// a consistent "RM<amount>" pattern.
-  static String normalize(String input) {
-    var text = input;
-
-    // Numeric-first forms: "5 ringgit", "5 rm", "5.50 ringgit"
-    // 🔥 FIX: guard with a negative lookbehind so a bare digit that is
-    // actually the tail end of a preceding number-word phrase (e.g. the
-    // "3" in "dua ratus 3 ringgit" or "dua ribu 3 ringgit") is NOT stolen
-    // into its own "RM3" here. Without this guard the regex would rewrite
-    // "dua ratus 3 ringgit" -> "dua ratus RM3", stranding "dua ratus" as
-    // plain text and leaving only the wrong "RM3" — which is how you'd
-    // end up with a spurious 23-style result downstream. Leaving the digit
-    // untouched lets the tokenized word-parser below combine it correctly
-    // with "ratus"/"ribu" instead.
-    text = text.replaceAllMapped(
-      RegExp(
-        r'(?<!\b(?:' + _magnitudeWords + r')\s)(\d+(?:\.\d+)?)\s*(ringgit|rm)\b',
-        caseSensitive: false,
-      ),
-      (m) => 'RM${m.group(1)}',
-    );
-    // "rm 5" / "rm5" already close to desired form; just tighten spacing.
-    text = text.replaceAllMapped(
-      RegExp(r'\brm\s*(\d+(?:\.\d+)?)\b', caseSensitive: false),
-      (m) => 'RM${m.group(1)}',
-    );
-
-    final tokens = text.split(RegExp(r'\s+'));
-    final out = <String>[];
-    var i = 0;
-    while (i < tokens.length) {
-      final lower = tokens[i].toLowerCase();
-
-      // Case: an already-numeric "RM5" (from the regex pass above) that
-      // might still have spoken cents trailing it, e.g. "RM5 lima puluh sen".
-      final rmNumeric = RegExp(r'^RM(\d+)$').firstMatch(tokens[i]);
-      if (rmNumeric != null) {
-        final next = _skipConnector(tokens, i + 1);
-        final cents = _parseCents(tokens, next);
-        if (cents.value != null) {
-          out.add('RM${rmNumeric.group(1)}.${_padCents(cents.value!)}');
-          i = next + cents.consumed;
-          continue;
-        }
-        out.add(tokens[i]);
-        i++;
-        continue;
-      }
-
-      // "rm <words>" [dan/and <cents> sen/cent]
-      if (lower == 'rm' && i + 1 < tokens.length) {
-        final parsed = _parseNumberWords(tokens, i + 1);
-        if (parsed.value != null) {
-          final afterAmount = i + 1 + parsed.consumed;
-          final next = _skipConnector(tokens, afterAmount);
-          final cents = _parseCents(tokens, next);
-          if (cents.value != null) {
-            out.add('RM${parsed.value}.${_padCents(cents.value!)}');
-            i = next + cents.consumed;
-            continue;
-          }
-          out.add('RM${parsed.value}');
-          i = afterAmount;
-          continue;
-        }
-      }
-
-      // "<words> ringgit" [dan/and <cents> sen/cent]
-      final parsed = _parseNumberWords(tokens, i);
-      if (parsed.value != null) {
-        final after = i + parsed.consumed;
-        if (after < tokens.length &&
-            tokens[after].toLowerCase() == 'ringgit') {
-          final afterRinggit = after + 1;
-          final next = _skipConnector(tokens, afterRinggit);
-          final cents = _parseCents(tokens, next);
-          if (cents.value != null) {
-            out.add('RM${parsed.value}.${_padCents(cents.value!)}');
-            i = next + cents.consumed;
-            continue;
-          }
-          out.add('RM${parsed.value}');
-          i = afterRinggit;
-          continue;
-        }
-      }
-
-      // Standalone cents with no ringgit part at all, e.g. "50 sen",
-      // "50 cent", or "lima puluh sen" on its own -> RM0.50.
-      final centsOnly = _parseCents(tokens, i);
-      if (centsOnly.value != null) {
-        out.add('RM0.${_padCents(centsOnly.value!)}');
-        i += centsOnly.consumed;
-        continue;
-      }
-
-      out.add(tokens[i]);
-      i++;
-    }
-
-    return out.join(' ');
-  }
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Hairline divider
@@ -409,31 +51,27 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
   final List<ChatMsg> messages    = [];
   final Set<int>      savedMsgIds = {};
   int                 _nextId     = 1;
-  // Stable id attached to each extracted transaction map (see sendMessage),
-  // used as a widget key so removing one card doesn't cause Flutter to
-  // reuse a stateful card's controller/state across different data when
-  // list indices shift.
-  int                 _nextLocalTxId = 1;
   final _scrollCtrl = ScrollController();
 
-  // Speech
+  // ── Speech ─────────────────────────────────────────────────────────────────
   final stt.SpeechToText _speech = stt.SpeechToText();
   bool    _speechReady   = false;
   bool    _isListening   = false;
   String  _preSpeechText = '';
   int     _retryCount    = 0;
+  double  _soundLevel    = 0.0;
   static const int _maxRetries = 2;
 
-  // 🔥 FIX: guards against a stale onResult callback landing after we've
-  // already stopped listening (e.g. user pressed Enter mid-speech). Without
-  // this, speech_to_text's final callback can re-populate the text field
-  // right after sendMessage() cleared it.
-  bool _ignoreSpeechResults = false;
+  // Language for dictation. Malay is default since the app targets MY users,
+  // but a lot of speech is mixed English ("Nasi lemak RM8" etc), so we let
+  // the user flip to English if recognition keeps missing.
+  bool get _useEnglish => _localeId == 'en_US';
+  String _localeId = 'ms_MY';
 
-  // Locale resolved from the device rather than hardcoded.
-  String _enLocaleId = 'en_US';
-  String _msLocaleId = 'ms_MY';
-  bool   _useMalay    = false;
+  // Safety timer: if onStatus never fires 'done' (can happen on some Android
+  // builds), force-stop the mic after a hard ceiling so it never gets stuck
+  // in a "listening forever" state.
+  Timer? _listenSafetyTimer;
 
   final Map<String, IconData> categoryIcons = {
     'food'         : Icons.restaurant_rounded,
@@ -466,38 +104,26 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
       _speechReady = await _speech.initialize(
         onError: _onSpeechError,
         onStatus: _onSpeechStatus,
+        debugLogging: false,
       );
     } catch (e) {
       _speechReady = false;
     }
 
-    if (_speechReady) {
-      await _resolveLocales();
-    }
+    if (!mounted) return;
 
-    if (!_speechReady && mounted) {
-      setState(() => error = 'Microphone permission denied. Enable it in Settings.');
-    } else if (mounted) {
+    if (!_speechReady) {
+      setState(() =>
+          error = 'Microphone permission denied. Enable it in Settings.');
+    } else {
       setState(() {});
-    }
-  }
-
-  Future<void> _resolveLocales() async {
-    try {
-      final locales = await _speech.locales();
-      for (final l in locales) {
-        final id = l.localeId.toLowerCase();
-        if (id.startsWith('en')) _enLocaleId = l.localeId;
-        if (id.startsWith('ms')) _msLocaleId = l.localeId;
-      }
-    } catch (_) {
-      // Keep defaults.
     }
   }
 
   void _onSpeechStatus(String status) {
     if (!mounted) return;
     if (status == 'done' || status == 'notListening') {
+      _listenSafetyTimer?.cancel();
       setState(() => _isListening = false);
     }
   }
@@ -505,13 +131,20 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
   void _onSpeechError(dynamic errorNotification) {
     if (!mounted) return;
 
-    final errorMsg = errorNotification.errorMsg ?? errorNotification.toString();
+    String errorMsg;
+    try {
+      errorMsg = (errorNotification.errorMsg ?? '').toString();
+    } catch (_) {
+      errorMsg = errorNotification.toString();
+    }
 
     const ignoredErrors = [
       'error_speech_timeout',
       'error_no_match',
       'error_audio',
     ];
+
+    _listenSafetyTimer?.cancel();
 
     if (ignoredErrors.any((e) => errorMsg.contains(e))) {
       setState(() => _isListening = false);
@@ -525,10 +158,7 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
          errorMsg.contains('error_recognizer_busy'))) {
       _retryCount++;
       Future.delayed(const Duration(milliseconds: 500), () {
-        // 🔥 FIX: don't auto-retry into a listening session if the user (or
-        // dispose()) has since asked us to stop / ignore results.
-        if (_ignoreSpeechResults) return;
-        _startListening();
+        if (mounted) _startListening();
       });
       return;
     }
@@ -539,40 +169,48 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
 
   // ── Start Listening ────────────────────────────────────────────────────────
   Future<void> _startListening() async {
-    if (!mounted) return;
     if (!_speechReady) {
       setState(() => error = 'Microphone not available.');
       return;
     }
-    // 🔥 FIX: guards a fast double-tap on the mic button. Without this,
-    // two overlapping calls can both capture _preSpeechText before either
-    // has updated _isListening, so the second call captures a stale value.
-    if (_isListening) return;
 
     if (_speech.isListening) {
       await _speech.stop();
     }
 
-    _ignoreSpeechResults = false;
     _preSpeechText = ctrl.text.trim();
-    setState(() { _isListening = true; error = null; });
+    setState(() {
+      _isListening = true;
+      _soundLevel  = 0.0;
+      error        = null;
+    });
+
+    // Hard safety ceiling — never let the mic get stuck open.
+    _listenSafetyTimer?.cancel();
+    _listenSafetyTimer = Timer(const Duration(seconds: 65), () {
+      if (mounted && _isListening) _stopListening();
+    });
 
     await _speech.listen(
-      listenMode:     stt.ListenMode.dictation,
-      partialResults: true,
-      listenFor:      const Duration(seconds: 30),
-      pauseFor:       const Duration(seconds: 3),
-      onResult:       _onSpeechResult,
-      localeId:       _useMalay ? _msLocaleId : _enLocaleId,
+      listenMode:      stt.ListenMode.dictation,
+      partialResults:  true,
+      listenFor:       const Duration(seconds: 60),
+      // Longer pause window so a natural mid-sentence breath doesn't
+      // prematurely cut off the recording ("Nasi lemak... RM8" gets a beat).
+      pauseFor:        const Duration(seconds: 4),
+      onResult:        _onSpeechResult,
+      onSoundLevelChange: (level) {
+        if (mounted) setState(() => _soundLevel = level);
+      },
+      localeId:        _localeId,
+      cancelOnError:   false,
     );
   }
 
   void _onSpeechResult(dynamic result) {
-    // 🔥 FIX: drop any callback that arrives after we've asked to stop.
-    if (_ignoreSpeechResults) return;
     if (!mounted) return;
 
-    final spoken = (result.recognizedWords as String).trim();
+    final spoken = (result.recognizedWords as String? ?? '').trim();
     if (spoken.isEmpty) return;
 
     final base    = _preSpeechText.isEmpty ? '' : '${_preSpeechText.trimRight()} ';
@@ -583,18 +221,15 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
       ctrl.selection = TextSelection.collapsed(offset: newText.length);
     });
 
-    if (result.finalResult == true) {
+    final isFinal = result.finalResult == true;
+    if (isFinal) {
       _preSpeechText = newText;
     }
   }
 
   // ── Stop Listening ─────────────────────────────────────────────────────────
   Future<void> _stopListening() async {
-    // 🔥 FIX: set this *before* awaiting stop(), so the trailing final
-    // onResult callback that speech_to_text fires during/after stop() is
-    // ignored instead of overwriting text we've already cleared/sent.
-    _ignoreSpeechResults = true;
-
+    _listenSafetyTimer?.cancel();
     if (_speech.isListening) {
       await _speech.stop();
     }
@@ -613,17 +248,16 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
     }
   }
 
-  // ── Toggle Speech Language ─────────────────────────────────────────────────
-  void _toggleSpeechLocale() {
+  // ── Toggle dictation language ────────────────────────────────────────────
+  Future<void> _toggleLanguage() async {
     HapticFeedback.selectionClick();
-    setState(() => _useMalay = !_useMalay);
+    if (_isListening) await _stopListening();
+    setState(() => _localeId = _useEnglish ? 'ms_MY' : 'en_US');
   }
 
   @override
   void dispose() {
-    // 🔥 FIX: stop any in-flight retry/callback from touching state after
-    // this widget is gone.
-    _ignoreSpeechResults = true;
+    _listenSafetyTimer?.cancel();
     _speech.cancel();
     ctrl.dispose();
     _scrollCtrl.dispose();
@@ -647,16 +281,12 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
     if (_isListening) {
       await _stopListening();
     }
-    // 🔥 FIX: normalize spoken/typed currency phrases ("five ringgit",
-    // "lima ringgit", "rm five") into the "RM<amount>" pattern the NLP
-    // service already understands, before we ever send it off.
-    final rawText = ctrl.text.trim();
-    if (rawText.isEmpty) { setState(() => error = 'Type or speak first.'); return; }
-    final text = CurrencyNormalizer.normalize(rawText);
+    final text = ctrl.text.trim();
+    if (text.isEmpty) { setState(() => error = 'Type or speak first.'); return; }
 
     setState(() {
       error = null; loading = true;
-      messages.add(ChatMsg(id: _nextId++, fromUser: true, text: rawText));
+      messages.add(ChatMsg(id: _nextId++, fromUser: true, text: text));
     });
     ctrl.text = '';
     Future.delayed(const Duration(milliseconds: 100), _scrollToBottom);
@@ -664,12 +294,6 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
     try {
       final res    = await nlp.analyze(text);
       final parsed = List<Map<String, dynamic>>.from(res);
-      // Tag each parsed transaction with a stable local id (not shown to
-      // the user, stripped before saving) so cards can be safely removed
-      // from the middle of the list without Flutter reusing state.
-      for (final r in parsed) {
-        r['_localTxId'] = _nextLocalTxId++;
-      }
       if (!mounted) return;
       setState(() {
         messages.add(ChatMsg(
@@ -694,6 +318,20 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
     } finally {
       if (mounted) setState(() => loading = false);
     }
+  }
+
+  /// Removes a single extracted transaction (before it's saved) from a
+  /// message's list, letting the user drop anything the AI misread.
+  void _deleteExtractedItem(int msgId, int index) {
+    final msgIndex = messages.indexWhere((m) => m.id == msgId);
+    if (msgIndex == -1) return;
+    final list = messages[msgIndex].extracted;
+    if (list == null || index < 0 || index >= list.length) return;
+
+    HapticFeedback.lightImpact();
+    setState(() {
+      list.removeAt(index);
+    });
   }
 
   Future<void> saveFromReply(
@@ -801,27 +439,11 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
     );
   }
 
-  // Removes a single extracted transaction from an AI reply's list, so an
-  // over-eager NLP result (e.g. it split one sentence into two
-  // transactions) can be corrected before saving. Once a message has been
-  // saved this is disabled (see alreadySaved handling in _AiBubble).
-  void _removeExtractedAt(int msgId, int index) {
-    HapticFeedback.lightImpact();
-    setState(() {
-      final msg = messages.firstWhere((m) => m.id == msgId);
-      if (msg.extracted == null || index < 0 || index >= msg.extracted!.length) {
-        return;
-      }
-      msg.extracted!.removeAt(index);
-    });
-  }
-
   Widget _bubble(ChatMsg m) {
     final isUser       = m.fromUser;
     final alreadySaved = savedMsgIds.contains(m.id);
 
     return Padding(
-      key: ValueKey(m.id),
       padding: const EdgeInsets.only(bottom: 14),
       child: Align(
         alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
@@ -831,14 +453,13 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
           child: isUser
               ? _UserBubble(text: m.text)
               : _AiBubble(
-                  msgId:         m.id,
                   text:          m.text,
                   extracted:     m.extracted,
                   alreadySaved:  alreadySaved,
                   categoryIcons: categoryIcons,
                   loading:       loading,
                   onSave: () => saveFromReply(m.id, m.extracted!),
-                  onRemoveAt: (idx) => _removeExtractedAt(m.id, idx),
+                  onDeleteItem: (index) => _deleteExtractedItem(m.id, index),
                 ),
         ),
       ),
@@ -921,13 +542,29 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
 
   Widget _micButton() {
     final cs = Theme.of(context).colorScheme;
+    // Map the live sound level (roughly -2..10 on most platforms) into a
+    // small pulsing ring so the user gets visual proof audio is being
+    // captured — the #1 cause of "voice recording doesn't work" complaints
+    // is actually silent failure with no feedback.
+    final level = (_soundLevel.clamp(0, 10)) / 10.0;
 
-    return Stack(
-      clipBehavior: Clip.none,
-      children: [
-        GestureDetector(
-          onTap: loading ? null : _toggleMic,
-          child: AnimatedContainer(
+    return GestureDetector(
+      onTap: loading ? null : _toggleMic,
+      onLongPress: loading ? null : _toggleLanguage,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          if (_isListening)
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 120),
+              width:  48 + (level * 16),
+              height: 48 + (level * 16),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: cs.primary.withOpacity(0.18),
+              ),
+            ),
+          AnimatedContainer(
             duration: const Duration(milliseconds: 250),
             width: 48,
             height: 48,
@@ -944,32 +581,8 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
               color: _isListening ? cs.onPrimary : cs.onSurfaceVariant,
             ),
           ),
-        ),
-        Positioned(
-          right: -2,
-          top: -2,
-          child: GestureDetector(
-            onTap: (loading || _isListening) ? null : _toggleSpeechLocale,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-              decoration: BoxDecoration(
-                color: cs.surface,
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: cs.outlineVariant, width: 0.8),
-              ),
-              child: Text(
-                _useMalay ? 'BM' : 'EN',
-                style: TextStyle(
-                  fontSize:   9,
-                  fontWeight: FontWeight.w700,
-                  color:      cs.onSurface,
-                  letterSpacing: 0.3,
-                ),
-              ),
-            ),
-          ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 
@@ -987,84 +600,112 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
       child: SafeArea(
         top: false,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(12, 12, 12, 14),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.end,
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
             children: [
-              _micButton(),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Container(
-                  decoration: BoxDecoration(
-                    color:        cs.surfaceContainerHighest.withOpacity(0.5),
-                    borderRadius: BorderRadius.circular(24),
-                    border: Border.all(
-                      color: _isListening ? cs.primary : cs.outlineVariant.withOpacity(0.5),
-                      width: 0.8,
+              // Small language chip so the user always knows (and can change)
+              // which language the mic is listening for.
+              Padding(
+                padding: const EdgeInsets.only(left: 60, bottom: 6),
+                child: GestureDetector(
+                  onTap: _toggleLanguage,
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(Icons.translate_rounded, size: 11, color: cs.onSurfaceVariant),
+                    const SizedBox(width: 4),
+                    Text(
+                      _useEnglish ? 'English' : 'Bahasa Melayu',
+                      style: TextStyle(
+                        fontSize: 10.5,
+                        color: cs.onSurfaceVariant,
+                        fontWeight: FontWeight.w500,
+                      ),
                     ),
-                  ),
-                  child: TextField(
-                    controller:      ctrl,
-                    minLines:        1,
-                    maxLines:        4,
-                    textInputAction: TextInputAction.send,
-                    onChanged:       (_) => setState(() {}),
-                    onSubmitted: (_) {
-                        if (loading) return;
-                        FocusScope.of(context).unfocus();
-                        sendMessage();
-                      },
-                    style: TextStyle(
-                        fontSize:   15,
-                        color:      cs.onSurface,
-                        fontWeight: FontWeight.w400,
-                        height:     1.45),
-                    decoration: InputDecoration(
-                      hintText: _isListening
-                          ? (_useMalay ? 'Mendengar...' : 'Listening...')
-                          : (_useMalay ? 'Contoh: Nasi lemak RM8' : 'e.g. Coffee RM8'),
-                      hintStyle: TextStyle(
-                          color:      t.hintColor,
-                          fontSize:   15,
-                          fontWeight: FontWeight.w400),
-                      border:         InputBorder.none,
-                      contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 20, vertical: 14),
-                    ),
-                  ),
+                    const SizedBox(width: 3),
+                    Icon(Icons.swap_horiz_rounded, size: 12, color: cs.onSurfaceVariant.withOpacity(0.7)),
+                  ]),
                 ),
               ),
-              const SizedBox(width: 8),
-              GestureDetector(
-                onTap: (loading || !hasText) ? null : sendMessage,
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 250),
-                  curve:    Curves.easeOutBack,
-                  width:    48,
-                  height:   48,
-                  margin:   const EdgeInsets.only(bottom: 2),
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: hasText ? cs.primary : Colors.transparent,
-                    border: Border.all(
-                      color: hasText ? Colors.transparent : cs.outlineVariant.withOpacity(0.5),
-                      width: 0.8,
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  _micButton(),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color:        cs.surfaceContainerHighest.withOpacity(0.5),
+                        borderRadius: BorderRadius.circular(24),
+                        border: Border.all(
+                          color: _isListening ? cs.primary : cs.outlineVariant.withOpacity(0.5),
+                          width: 0.8,
+                        ),
+                      ),
+                      child: TextField(
+                        controller:      ctrl,
+                        minLines:        1,
+                        maxLines:        4,
+                        textInputAction: TextInputAction.send,
+                        onChanged:       (_) => setState(() {}),
+                        onSubmitted: (_) {
+                            if (loading) return;
+                            FocusScope.of(context).unfocus();
+                            sendMessage();
+                          },
+                        style: TextStyle(
+                            fontSize:   15,
+                            color:      cs.onSurface,
+                            fontWeight: FontWeight.w400,
+                            height:     1.45),
+                        decoration: InputDecoration(
+                          hintText: _isListening
+                              ? (_useEnglish ? 'Listening...' : 'Mendengar...')
+                              : 'Contoh: Nasi lemak RM8',
+                          hintStyle: TextStyle(
+                              color:      t.hintColor,
+                              fontSize:   15,
+                              fontWeight: FontWeight.w400),
+                          border:         InputBorder.none,
+                          contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 20, vertical: 14),
+                        ),
+                      ),
                     ),
                   ),
-                  child: Center(
-                    child: loading
-                        ? SizedBox(
-                            width:  18,
-                            height: 18,
-                            child: CircularProgressIndicator(
-                                strokeWidth: 1.5,
-                                color: cs.onSurfaceVariant.withOpacity(0.5)),
-                          )
-                        : Icon(Icons.arrow_upward_rounded,
-                            size:  20,
-                            color: hasText ? cs.onPrimary : t.hintColor),
+                  const SizedBox(width: 8),
+                  GestureDetector(
+                    onTap: (loading || !hasText) ? null : sendMessage,
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 250),
+                      curve:    Curves.easeOutBack,
+                      width:    48,
+                      height:   48,
+                      margin:   const EdgeInsets.only(bottom: 2),
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: hasText ? cs.primary : Colors.transparent,
+                        border: Border.all(
+                          color: hasText ? Colors.transparent : cs.outlineVariant.withOpacity(0.5),
+                          width: 0.8,
+                        ),
+                      ),
+                      child: Center(
+                        child: loading
+                            ? SizedBox(
+                                width:  18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                    strokeWidth: 1.5,
+                                    color: cs.onSurfaceVariant.withOpacity(0.5)),
+                              )
+                            : Icon(Icons.arrow_upward_rounded,
+                                size:  20,
+                                color: hasText ? cs.onPrimary : t.hintColor),
+                      ),
+                    ),
                   ),
-                ),
+                ],
               ),
             ],
           ),
@@ -1272,24 +913,22 @@ class _UserBubble extends StatelessWidget {
 //  AI bubble
 // ─────────────────────────────────────────────────────────────────────────────
 class _AiBubble extends StatelessWidget {
-  final int                         msgId;
-  final String                      text;
-  final List<Map<String, dynamic>>? extracted;
-  final bool                        alreadySaved;
-  final Map<String, IconData>       categoryIcons;
-  final bool                        loading;
-  final VoidCallback                onSave;
-  final void Function(int index)    onRemoveAt;
+  final String                       text;
+  final List<Map<String, dynamic>>?  extracted;
+  final bool                         alreadySaved;
+  final Map<String, IconData>        categoryIcons;
+  final bool                         loading;
+  final VoidCallback                 onSave;
+  final ValueChanged<int>            onDeleteItem;
 
   const _AiBubble({
-    required this.msgId,
     required this.text,
     required this.extracted,
     required this.alreadySaved,
     required this.categoryIcons,
     required this.loading,
     required this.onSave,
-    required this.onRemoveAt,
+    required this.onDeleteItem,
   });
 
   bool get hasExtracted => extracted != null && extracted!.isNotEmpty;
@@ -1332,43 +971,31 @@ class _AiBubble extends StatelessWidget {
           )),
           if (hasExtracted) ...[
             const SizedBox(height: 14),
-            if (extracted!.length > 1 && !alreadySaved)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 8),
-                child: Text(
-                  '${extracted!.length} transactions found — remove any that don\'t belong.',
-                  style: TextStyle(
-                      fontSize: 11.5,
-                      color: cs.onSurfaceVariant,
-                      fontWeight: FontWeight.w400),
-                ),
-              ),
             ...extracted!.asMap().entries.map((e) =>
               EditableTransactionCard(
-                // Keyed by a stable per-transaction id (not the list index)
-                // so removing a card from the middle doesn't make Flutter
-                // reuse another card's controller/state for different data.
-                key:           ValueKey('${msgId}_${e.value['_localTxId'] ?? e.key}'),
+                key:           ValueKey(e.value['_key'] ?? e.key),
                 data:          e.value,
                 categoryIcons: categoryIcons,
+                showDelete:    !alreadySaved,
                 onChanged:     (u) => extracted![e.key] = u,
-                onRemove:      alreadySaved ? null : () => onRemoveAt(e.key),
+                onDelete:      alreadySaved ? null : () => onDeleteItem(e.key),
               ),
             ),
             const SizedBox(height: 16),
-            _ConfirmButton(
-              saved:   alreadySaved,
-              loading: loading,
-              onTap:   alreadySaved || loading ? null : onSave,
-            ),
-          ] else if (extracted != null && extracted!.isEmpty) ...[
+            if (!alreadySaved || extracted!.isNotEmpty)
+              _ConfirmButton(
+                saved:   alreadySaved,
+                loading: loading,
+                onTap:   alreadySaved || loading ? null : onSave,
+              ),
+          ] else if (extracted != null && extracted!.isEmpty && !alreadySaved) ...[
             const SizedBox(height: 10),
             Text(
-              'All transactions removed. Nothing to save.',
+              'All transactions removed.',
               style: TextStyle(
-                  fontSize: 13,
-                  color: cs.onSurfaceVariant,
-                  fontWeight: FontWeight.w400),
+                  fontSize: 12.5,
+                  fontStyle: FontStyle.italic,
+                  color: cs.onSurfaceVariant),
             ),
           ],
         ],
@@ -1487,34 +1114,22 @@ class ChatMsg {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Decimal amount formatter — rejects an invalid edit instead of mangling it
-// ─────────────────────────────────────────────────────────────────────────────
-class _DecimalInputFormatter extends TextInputFormatter {
-  @override
-  TextEditingValue formatEditUpdate(
-      TextEditingValue oldValue, TextEditingValue newValue) {
-    if (newValue.text.isEmpty) return newValue;
-    if (RegExp(r'^\d+\.?\d{0,2}$').hasMatch(newValue.text)) return newValue;
-    return oldValue;
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 //  EDITABLE TRANSACTION CARD
 // ─────────────────────────────────────────────────────────────────────────────
 class EditableTransactionCard extends StatefulWidget {
   final Map<String, dynamic>          data;
-  final Map<String, IconData>          categoryIcons;
+  final Map<String, IconData>         categoryIcons;
   final Function(Map<String, dynamic>) onChanged;
-  // Null hides the remove button entirely (e.g. once the message is saved).
-  final VoidCallback?                  onRemove;
+  final bool                          showDelete;
+  final VoidCallback?                 onDelete;
 
   const EditableTransactionCard({
     super.key,
     required this.data,
     required this.categoryIcons,
     required this.onChanged,
-    this.onRemove,
+    this.showDelete = true,
+    this.onDelete,
   });
 
   @override
@@ -1530,11 +1145,8 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
   @override
   void initState() {
     super.initState();
-    final rawAmt = widget.data['amount'];
-    final numAmt = rawAmt is num
-        ? rawAmt.toDouble()
-        : double.tryParse(rawAmt?.toString().replaceAll(',', '') ?? '') ?? 0.0;
-    _amtCtrl = TextEditingController(text: formatAmount(numAmt));
+    _amtCtrl = TextEditingController(
+        text: widget.data['amount']?.toString() ?? '0');
     _selectedCat = widget.data['category'] ?? 'other';
     try {
       _selectedDate = widget.data['date'] != null &&
@@ -1578,9 +1190,32 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
       lastDate:    DateTime.now().add(const Duration(days: 365)),
     );
     if (picked != null) {
-      _selectedDate = picked;
+      setState(() => _selectedDate = picked);
       _notify();
     }
+  }
+
+  Future<void> _confirmDelete(BuildContext context) async {
+    final cs = Theme.of(context).colorScheme;
+    final rawDesc = (widget.data['description'] ?? 'this transaction').toString();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Remove transaction?'),
+        content: Text('"$rawDesc" will be removed from this list before saving.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text('Remove', style: TextStyle(color: cs.error)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) widget.onDelete?.call();
   }
 
   @override
@@ -1593,12 +1228,8 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
     final validCat = widget.categoryIcons.containsKey(_selectedCat)
         ? _selectedCat : 'other';
 
-    return Padding(
-      padding: const EdgeInsets.only(top: 10),
-      child: Stack(
-        clipBehavior: Clip.none,
-        children: [
-          Container(
+    return Container(
+      margin: const EdgeInsets.only(top: 10),
       decoration: BoxDecoration(
         color:        cs.surfaceContainerLowest,
         borderRadius: BorderRadius.circular(14),
@@ -1622,6 +1253,7 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
                 ),
                 const SizedBox(width: 8),
 
+                // ── POPUP MENU BUTTON ──
                 Expanded(
                   child: Theme(
                     data: t.copyWith(
@@ -1697,6 +1329,7 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
                 ),
                 const SizedBox(width: 8),
 
+                // ── AMOUNT INPUT ──
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                   decoration: BoxDecoration(
@@ -1719,7 +1352,9 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
                         child: TextField(
                           controller:   _amtCtrl,
                           keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                          inputFormatters: [_DecimalInputFormatter()],
+                          inputFormatters: [
+                            FilteringTextInputFormatter.allow(RegExp(r'^\d+\.?\d{0,2}')),
+                          ],
                           textAlign: TextAlign.right,
                           onChanged:  (_) => _notify(),
                           cursorColor:  cs.primary,
@@ -1738,6 +1373,23 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
                     ],
                   ),
                 ),
+
+                if (widget.showDelete && widget.onDelete != null) ...[
+                  const SizedBox(width: 6),
+                  GestureDetector(
+                    onTap: () => _confirmDelete(context),
+                    child: Container(
+                      width: 32,
+                      height: 32,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: cs.errorContainer.withOpacity(0.5),
+                      ),
+                      child: Icon(Icons.delete_outline_rounded,
+                          size: 16, color: cs.error),
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -1786,38 +1438,6 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
               ],
             ),
           ),
-        ],
-      ),
-          ),
-          // Remove button — lets you drop a transaction the NLP shouldn't
-          // have split out (e.g. one sentence parsed into two entries)
-          // before confirming. Hidden once the message has been saved.
-          if (widget.onRemove != null)
-            Positioned(
-              right: -6,
-              top: -6,
-              child: GestureDetector(
-                onTap: widget.onRemove,
-                child: Container(
-                  width: 22,
-                  height: 22,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: cs.surface,
-                    border: Border.all(color: cs.outlineVariant, width: 0.8),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Theme.of(context).shadowColor.withOpacity(0.06),
-                        blurRadius: 4,
-                        offset: const Offset(0, 1),
-                      ),
-                    ],
-                  ),
-                  child: Icon(Icons.close_rounded,
-                      size: 13, color: cs.onSurfaceVariant),
-                ),
-              ),
-            ),
         ],
       ),
     );
