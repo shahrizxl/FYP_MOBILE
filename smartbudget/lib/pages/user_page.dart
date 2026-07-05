@@ -13,7 +13,6 @@ import '../api_config.dart';
 import '../services/auth_service.dart';
 import '../services/transaction_service.dart';
 import '../services/notification_service.dart';
-
 import '../services/auth_gate.dart';
 import 'transaction_management_page.dart';
 import 'user_settings_page.dart';
@@ -22,9 +21,9 @@ import '../services/streak_service.dart';
 import '../services/globals.dart';
 import 'prediction_page.dart';
 
-// ─────────────────────────────────────────────────────────────────────────────
+// =============================================================================
 // USER PAGE
-// ─────────────────────────────────────────────────────────────────────────────
+// =============================================================================
 
 class UserPage extends StatefulWidget {
   const UserPage({super.key});
@@ -36,16 +35,16 @@ class UserPage extends StatefulWidget {
 class _UserPageState extends State<UserPage> {
   final _txService = TransactionService();
 
-  // ── Loading / error state ────────────────────────────────────────────────
+  // ── Loading / error ───────────────────────────────────────────────────────
   bool _loading = true;
   String? _error;
   List<Map<String, dynamic>> _txs = [];
 
-  // ── Date selection ───────────────────────────────────────────────────────
+  // ── Date selection ────────────────────────────────────────────────────────
   int _selectedYear = DateTime.now().year;
   int? _selectedMonth = DateTime.now().month;
 
-  // ── Budget targets ───────────────────────────────────────────────────────
+  // ── Budget targets ────────────────────────────────────────────────────────
   bool _targetsLoading = false;
   String? _targetsError;
   double _monthlyBudget = 0;
@@ -53,43 +52,27 @@ class _UserPageState extends State<UserPage> {
   Map<String, double> _rawPctByCat = {};
   Map<String, double> _rawAmtByCat = {};
 
-  // ── Live metrics ─────────────────────────────────────────────────────────
-  double? _forecastProgress;
+  // ── Live metrics ──────────────────────────────────────────────────────────
   double? _actualSpentSoFar;
-  double? _remainingPrediction;
 
-  // ── Prediction state ─────────────────────────────────────────────────────
+  // ── Prediction state ──────────────────────────────────────────────────────
   bool _predLoading = false;
-  String? _predError;    
-  String? _predMessage;  
+  String? _predError;
+  String? _predMessage;
   double? _predNextDay;
   double? _predNextWeek;
   double? _predNextMonth;
-  double? _predNextMonthLower;
-  double? _predNextMonthUpper;
-  String? _predExplanationText;
-  List<Map<String, dynamic>> _predFeatureImportances = [];
-  List<Map<String, dynamic>> _predictionMetrics = [];
-  Map<String, dynamic>? _predWeekendInfluence;
-  List<Map<String, dynamic>> _predCategoryImpact = [];
-  List<Map<String, dynamic>> _predAnomalies = [];
-  Map<String, dynamic>? _predMonthlyTrend;
-
   int _predReqId = 0;
 
-  // ── ML Training State (Cached) ───────────────────────────────────────────
+  // ── ML training state ─────────────────────────────────────────────────────
   int _mlDaysCount = 0;
-  int _mlDaysRemaining = 30;
-  double _mlProgress = 0.0;
   bool _mlReady = false;
 
-  // ── One-shot notification guards ─────────────────────────────────────────
+  // ── One-shot notification guards ──────────────────────────────────────────
   bool _milestoneChecked = false;
   bool _inactiveChecked = false;
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // GETTERS
-  // ─────────────────────────────────────────────────────────────────────────
+  // ── Getters ───────────────────────────────────────────────────────────────
 
   String? get _userId => Supabase.instance.client.auth.currentUser?.id;
 
@@ -101,29 +84,13 @@ class _UserPageState extends State<UserPage> {
     return name[0].toUpperCase() + name.substring(1);
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // LIFECYCLE
-  // ─────────────────────────────────────────────────────────────────────────
+  // ── Lifecycle ─────────────────────────────────────────────────────────────
 
   @override
   void initState() {
     super.initState();
     globalTransactionUpdateNotifier.addListener(_onGlobalTxUpdate);
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _initializeData();
-    });
-  }
-
-  // FIX 1: Run APIs concurrently and do not block the UI waiting for predictions
-  Future<void> _initializeData() async {
-    _silentlyUpdateStreak(); // Fire and forget
-    
-    await _loadTx();
-    await _loadTargets();
-
-
-    _loadPrediction(); // Let it load in the background
-    _checkInactiveUser();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _initializeData());
   }
 
   @override
@@ -132,9 +99,15 @@ class _UserPageState extends State<UserPage> {
     super.dispose();
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // DATA HELPERS
-  // ─────────────────────────────────────────────────────────────────────────
+  Future<void> _initializeData() async {
+    _silentlyUpdateStreak();
+    await _loadTx();
+    await _loadTargets();
+    _loadPrediction();
+    _checkInactiveUser();
+  }
+
+  // ── Data helpers ──────────────────────────────────────────────────────────
 
   DateTime? _parseDate(dynamic raw) {
     if (raw == null) return null;
@@ -150,7 +123,6 @@ class _UserPageState extends State<UserPage> {
     return DateFormat('dd-MM-yyyy').format(dt.toLocal());
   }
 
-  // FIX 2: Filter using the pre-parsed cached date for immense speedup
   bool _inSelectedYear(Map<String, dynamic> t) {
     final dt = t['_parsedDate'] as DateTime?;
     return dt != null && dt.year == _selectedYear;
@@ -191,7 +163,8 @@ class _UserPageState extends State<UserPage> {
         .join(' ');
   }
 
-  Map<String, double> _spentByCategoryForMonth(List<Map<String, dynamic>> monthTx) {
+  Map<String, double> _spentByCategoryForMonth(
+      List<Map<String, dynamic>> monthTx) {
     final Map<String, double> totals = {};
     for (final t in monthTx) {
       if ((t['type'] ?? '').toString().trim().toLowerCase() != 'expense') {
@@ -203,32 +176,17 @@ class _UserPageState extends State<UserPage> {
     return totals;
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // PREDICTION STATE RESET
-  // ─────────────────────────────────────────────────────────────────────────
+  // ── Prediction state reset ────────────────────────────────────────────────
 
   void _clearPredictionState() {
     _predNextDay = null;
     _predNextWeek = null;
     _predNextMonth = null;
-    _predNextMonthLower = null;
-    _predNextMonthUpper = null;
-    _predExplanationText = null;
-    _predFeatureImportances = [];
-    _predictionMetrics = [];
-    _predWeekendInfluence = null;
-    _predCategoryImpact = [];
-    _predAnomalies = [];
-    _predMonthlyTrend = null;
-    _forecastProgress = null;
     _actualSpentSoFar = null;
-    _remainingPrediction = null;
     _predMessage = null;
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // LOAD TRANSACTIONS
-  // ─────────────────────────────────────────────────────────────────────────
+  // ── Load transactions ─────────────────────────────────────────────────────
 
   Future<void> _loadTx() async {
     final uid = _userId;
@@ -250,30 +208,28 @@ class _UserPageState extends State<UserPage> {
 
     try {
       final data = await _txService.getMyTransactions(uid);
-      
-      // FIX 2: Parse DateTimes ONCE and cache them inside the map
+
       final parsedData = data.map((t) {
-        final dt = _parseDate(t['date'])?.toLocal() ?? DateTime.fromMillisecondsSinceEpoch(0);
-        return {
-          ...t,
-          '_parsedDate': dt,
-        };
+        final dt = _parseDate(t['date'])?.toLocal() ??
+            DateTime.fromMillisecondsSinceEpoch(0);
+        return {...t, '_parsedDate': dt};
       }).toList();
 
-      // Sort using the cached dates
-      parsedData.sort((a, b) => (b['_parsedDate'] as DateTime).compareTo(a['_parsedDate'] as DateTime));
+      parsedData.sort((a, b) =>
+          (b['_parsedDate'] as DateTime).compareTo(a['_parsedDate'] as DateTime));
 
       if (!mounted) return;
       _txs = parsedData;
-      
-      // Calculate ML metrics only when transactions change
       _calculateMlMetrics();
 
-      // Milestone notification (once per session)
       if (!_milestoneChecked) {
-        final income = _txs.where((t) => (t['type'] ?? '').toString().trim().toLowerCase() == 'income')
+        final income = _txs
+            .where((t) =>
+                (t['type'] ?? '').toString().trim().toLowerCase() == 'income')
             .fold<double>(0, (s, t) => s + _asDouble(t['amount']));
-        final expense = _txs.where((t) => (t['type'] ?? '').toString().trim().toLowerCase() == 'expense')
+        final expense = _txs
+            .where((t) =>
+                (t['type'] ?? '').toString().trim().toLowerCase() == 'expense')
             .fold<double>(0, (s, t) => s + _asDouble(t['amount']));
         final balance = income - expense;
         if (balance > 0) {
@@ -292,7 +248,6 @@ class _UserPageState extends State<UserPage> {
     }
   }
 
-  // FIX 3: Centralized metric calculation instead of expensive getters
   void _calculateMlMetrics() {
     final uniqueDays = <String>{};
     final now = DateTime.now();
@@ -305,20 +260,17 @@ class _UserPageState extends State<UserPage> {
       final dt = tx['_parsedDate'] as DateTime?;
       if (dt == null || dt.isBefore(trainStart) || dt.isAfter(now)) continue;
 
-      uniqueDays.add('${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')}');
+      uniqueDays.add(
+          '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')}');
     }
 
     setState(() {
       _mlDaysCount = uniqueDays.length;
-      _mlDaysRemaining = (30 - _mlDaysCount).clamp(0, 30);
-      _mlProgress = (_mlDaysCount / 30).clamp(0.0, 1.0);
       _mlReady = _mlDaysCount >= 30;
     });
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // LOAD BUDGET TARGETS
-  // ─────────────────────────────────────────────────────────────────────────
+  // ── Load budget targets ───────────────────────────────────────────────────
 
   Future<void> _loadTargets() async {
     final uid = _userId;
@@ -399,22 +351,19 @@ class _UserPageState extends State<UserPage> {
         _targetRmByCat = rmMap;
       });
 
-    // Budget alert notifications
-    if (_selectedMonth != null && _targetRmByCat.isNotEmpty) {
-      final monthTx = _txs.where(_inSelectedMonth).toList();
-      final spentByCat = _spentByCategoryForMonth(monthTx);
-
-      for (final entry in _targetRmByCat.entries) {
-        await NotificationService.instance.checkBudgetAlert(
-          spent: spentByCat[entry.key] ?? 0,
-          budget: entry.value,
-          category: _prettyCat(entry.key),
-          budgetYear: _selectedYear,
-          budgetMonth: _selectedMonth!,
-        );
+      if (_selectedMonth != null && _targetRmByCat.isNotEmpty) {
+        final monthTx = _txs.where(_inSelectedMonth).toList();
+        final spentByCat = _spentByCategoryForMonth(monthTx);
+        for (final entry in _targetRmByCat.entries) {
+          await NotificationService.instance.checkBudgetAlert(
+            spent: spentByCat[entry.key] ?? 0,
+            budget: entry.value,
+            category: _prettyCat(entry.key),
+            budgetYear: _selectedYear,
+            budgetMonth: _selectedMonth!,
+          );
+        }
       }
-    }
-
     } catch (e) {
       if (!mounted) return;
       setState(() => _targetsError = e.toString());
@@ -423,9 +372,7 @@ class _UserPageState extends State<UserPage> {
     }
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // LOAD PREDICTION
-  // ─────────────────────────────────────────────────────────────────────────
+  // ── Load prediction ───────────────────────────────────────────────────────
 
   Future<void> _loadPrediction() async {
     if (!mounted) return;
@@ -452,20 +399,25 @@ class _UserPageState extends State<UserPage> {
 
     final expenses = _txs
         .where((t) {
-          if ((t['type'] ?? '').toString().trim().toLowerCase() != 'expense') return false;
-          final dt = t['_parsedDate'] as DateTime?; // Use cached date
-          if (dt == null || dt.isBefore(trainStart) || dt.isAfter(now)) return false;
-          return true;
+          if ((t['type'] ?? '').toString().trim().toLowerCase() != 'expense') {
+            return false;
+          }
+          final dt = t['_parsedDate'] as DateTime?;
+          if (dt == null) return false;
+          final isAnchorMonth = _selectedMonth != null &&
+              dt.year == _selectedYear &&
+              dt.month == _selectedMonth;
+          if (isAnchorMonth) return true;
+          return !dt.isBefore(trainStart) && !dt.isAfter(now);
         })
-        .map((t) {
-          return {
-            'date': DateFormat('yyyy-MM-dd').format(t['_parsedDate'] as DateTime),
-            'amount': _asDouble(t['amount']),
-            'type': 'expense',
-            'description': (t['description'] ?? '').toString(),
-            'category': (t['category'] ?? '').toString(),
-          };
-        })
+        .map((t) => {
+              'date': DateFormat('yyyy-MM-dd')
+                  .format(t['_parsedDate'] as DateTime),
+              'amount': _asDouble(t['amount']),
+              'type': 'expense',
+              'description': (t['description'] ?? '').toString(),
+              'category': (t['category'] ?? '').toString(),
+            })
         .toList()
       ..sort((a, b) {
         final ad = DateTime.tryParse(a['date'] as String) ?? DateTime(1970);
@@ -493,11 +445,13 @@ class _UserPageState extends State<UserPage> {
     }
 
     try {
-      final res = await http.post(
-        Uri.parse(ApiConfig.predictUrl),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode(body),
-      ).timeout(const Duration(seconds: 30));
+      final res = await http
+          .post(
+            Uri.parse(ApiConfig.predictUrl),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode(body),
+          )
+          .timeout(const Duration(seconds: 60));
 
       if (!mounted || reqId != _predReqId) return;
 
@@ -510,88 +464,30 @@ class _UserPageState extends State<UserPage> {
       }
 
       final decoded = jsonDecode(res.body);
-      final data = (decoded is Map<String, dynamic>) ? decoded : <String, dynamic>{};
+      final data = (decoded is Map<String, dynamic>)
+          ? decoded
+          : <String, dynamic>{};
 
       final nd  = _numOrNull(data['next_day']);
       final nw  = _numOrNull(data['next_week']);
       final nm  = _numOrNull(data['next_month']);
-      final nml = _numOrNull(data['next_month_lower']);
-      final nmu = _numOrNull(data['next_month_upper']);
       final msg = (data['message'] ?? '').toString().trim();
 
-      List<Map<String, dynamic>> metrics = [];
-      if (data['metrics'] is List) {
-        metrics = List<Map<String, dynamic>>.from(
-          (data['metrics'] as List).whereType<Map<String, dynamic>>(),
-        );
-      }
-
-      String? explanationText;
-      List<Map<String, dynamic>> featureImportances = [];
-      Map<String, dynamic>? weekendInfluence;
-      List<Map<String, dynamic>> categoryImpact = [];
-
-      if (data['explainability'] is Map<String, dynamic>) {
-        final expl = data['explainability'] as Map<String, dynamic>;
-        explanationText = expl['explanation_text']?.toString();
-
-        if (expl['feature_importances'] is List) {
-          featureImportances = List<Map<String, dynamic>>.from(
-            (expl['feature_importances'] as List).whereType<Map<String, dynamic>>(),
-          );
-        }
-        if (expl['weekend_influence'] is Map<String, dynamic>) {
-          weekendInfluence = expl['weekend_influence'] as Map<String, dynamic>;
-        }
-        if (expl['category_impact'] is List) {
-          categoryImpact = List<Map<String, dynamic>>.from(
-            (expl['category_impact'] as List).whereType<Map<String, dynamic>>(),
-          );
-        }
-      }
-
-      List<Map<String, dynamic>> anomalies = [];
-      if (data['anomalies'] is List) {
-        anomalies = List<Map<String, dynamic>>.from(
-          (data['anomalies'] as List).whereType<Map<String, dynamic>>(),
-        );
-      }
-
-      Map<String, dynamic>? monthlyTrend;
-      if (data['monthly_trend'] is Map<String, dynamic>) {
-        monthlyTrend = data['monthly_trend'] as Map<String, dynamic>;
-      }
-
       double? actualSpent;
-      double? remainingPrediction;
-      double? forecastProgress;
       if (data['live_metrics'] is Map<String, dynamic>) {
         final lm = data['live_metrics'] as Map<String, dynamic>;
-        actualSpent         = _numOrNull(lm['actual_spent']);
-        remainingPrediction = _numOrNull(lm['remaining_prediction']);
-        forecastProgress    = _numOrNull(lm['progress_pct']);
+        actualSpent = _numOrNull(lm['actual_spent']);
       }
 
       if (!mounted || reqId != _predReqId) return;
       setState(() {
-        _predNextDay            = nd;
-        _predNextWeek           = nw;
-        _predNextMonth          = nm;
-        _predNextMonthLower     = nml;
-        _predNextMonthUpper     = nmu;
-        _predictionMetrics      = metrics;
-        _predLoading            = false;
-        _predMessage            = msg.isEmpty ? null : msg;
-        _predError              = null;
-        _predExplanationText    = explanationText;
-        _predFeatureImportances = featureImportances;
-        _predWeekendInfluence   = weekendInfluence;
-        _predCategoryImpact     = categoryImpact;
-        _predAnomalies          = anomalies;
-        _predMonthlyTrend       = monthlyTrend;
-        _actualSpentSoFar       = actualSpent;
-        _remainingPrediction    = remainingPrediction;
-        _forecastProgress       = forecastProgress;
+        _predNextDay   = nd;
+        _predNextWeek  = nw;
+        _predNextMonth = nm;
+        _predLoading   = false;
+        _predMessage   = msg.isEmpty ? null : msg;
+        _predError     = null;
+        _actualSpentSoFar = actualSpent;
       });
 
       if (monthMode && _predNextMonth != null && _monthlyBudget > 0) {
@@ -617,9 +513,7 @@ class _UserPageState extends State<UserPage> {
     }
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // STREAK & INACTIVE USER
-  // ─────────────────────────────────────────────────────────────────────────
+  // ── Streak & inactive user ────────────────────────────────────────────────
 
   Future<void> _silentlyUpdateStreak() async {
     if (_userId == null) return;
@@ -642,21 +536,15 @@ class _UserPageState extends State<UserPage> {
   }
 
   Future<void> _checkInactiveUser() async {
-    if (!mounted) return;
-    if (_inactiveChecked) return;
-    if (_txs.isEmpty) return;
-
+    if (!mounted || _inactiveChecked || _txs.isEmpty) return;
     _inactiveChecked = true;
     final lastDate = _txs.first['_parsedDate'] as DateTime?;
     if (lastDate == null) return;
-
     final daysInactive = DateTime.now().difference(lastDate).inDays;
     await NotificationService.instance.checkInactive(daysInactive);
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // NAVIGATION HELPERS
-  // ─────────────────────────────────────────────────────────────────────────
+  // ── Navigation ────────────────────────────────────────────────────────────
 
   Future<void> _openTargetsEditor() async {
     if (_selectedMonth == null) {
@@ -668,7 +556,10 @@ class _UserPageState extends State<UserPage> {
     }
     await Navigator.push(
       context,
-      MaterialPageRoute(builder: (_) => CategoryBreakdownPage(year: _selectedYear, month: _selectedMonth!)),
+      MaterialPageRoute(
+        builder: (_) => CategoryBreakdownPage(
+            year: _selectedYear, month: _selectedMonth!),
+      ),
     );
     if (!mounted) return;
     _initializeData();
@@ -690,9 +581,7 @@ class _UserPageState extends State<UserPage> {
     _initializeData();
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // BUILD
-  // ─────────────────────────────────────────────────────────────────────────
+  // ── Build ─────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
@@ -708,53 +597,61 @@ class _UserPageState extends State<UserPage> {
             (_selectedYear == now.year && _selectedMonth! > now.month))
         : (_selectedYear > now.year);
 
+    final bool isPastMonth = isMonthMode &&
+        (_selectedYear < now.year ||
+            (_selectedYear == now.year && _selectedMonth! < now.month));
+
     final double? displayNextDay   = isFuture ? null : _predNextDay;
     final double? displayNextWeek  = isFuture ? null : _predNextWeek;
-    final double? displayNextMonth = isFuture ? null : _predNextMonth;
-    final double? displayLower     = isFuture ? null : _predNextMonthLower;
-    final double? displayUpper     = isFuture ? null : _predNextMonthUpper;
-
-    final bool showExplain = !isFuture && !_predLoading &&
-        (_predExplanationText != null || _predFeatureImportances.isNotEmpty);
-
-    final bool showAnomalies = !isFuture && !_predLoading && _predAnomalies.isNotEmpty;
-    final bool showTrend = !isFuture && !_predLoading && _predMonthlyTrend != null;
-    final bool showLiveMetrics = !isFuture && !_predLoading &&
-        (_actualSpentSoFar != null || _remainingPrediction != null || _forecastProgress != null);
+    final double? displayNextMonth = isFuture
+        ? null
+        : (isPastMonth && _actualSpentSoFar != null
+            ? _actualSpentSoFar
+            : _predNextMonth);
 
     final yearTx  = _txs.where(_inSelectedYear).toList();
-    final monthTx = isMonthMode ? yearTx.where(_inSelectedMonth).toList() : <Map<String, dynamic>>[];
+    final monthTx = isMonthMode
+        ? yearTx.where(_inSelectedMonth).toList()
+        : <Map<String, dynamic>>[];
     final activeTx = isMonthMode ? monthTx : yearTx;
 
     final label = isMonthMode
-        ? DateFormat('MMMM yyyy').format(DateTime(_selectedYear, _selectedMonth!))
+        ? DateFormat('MMMM yyyy')
+            .format(DateTime(_selectedYear, _selectedMonth!))
         : 'Year $_selectedYear';
 
     final incomeTotal = activeTx
-        .where((tx) => (tx['type'] ?? '').toString().trim().toLowerCase() == 'income')
+        .where((tx) =>
+            (tx['type'] ?? '').toString().trim().toLowerCase() == 'income')
         .fold<double>(0, (s, tx) => s + _asDouble(tx['amount']));
     final expenseTotal = activeTx
-        .where((tx) => (tx['type'] ?? '').toString().trim().toLowerCase() == 'expense')
+        .where((tx) =>
+            (tx['type'] ?? '').toString().trim().toLowerCase() == 'expense')
         .fold<double>(0, (s, tx) => s + _asDouble(tx['amount']));
-
     final double netBalance = incomeTotal - expenseTotal;
 
     double totalSavings = 0;
     for (final item in _txs) {
       final type = (item['type'] ?? '').toString().trim().toLowerCase();
-      final amt = _asDouble(item['amount']);
-      if (type == 'income') totalSavings += amt;
-      else if (type == 'expense') totalSavings -= amt;
+      final amt  = _asDouble(item['amount']);
+      if (type == 'income') {
+        totalSavings += amt;
+      } else if (type == 'expense') {
+        totalSavings -= amt;
+      }
     }
 
     final Map<String, double> catTotals = {};
     for (final tMap in activeTx) {
-      if ((tMap['type'] ?? '').toString().trim().toLowerCase() != 'expense') continue;
+      if ((tMap['type'] ?? '').toString().trim().toLowerCase() != 'expense') {
+        continue;
+      }
       final key = _normCatKey((tMap['category'] ?? '').toString().trim());
       catTotals[key] = (catTotals[key] ?? 0) + _asDouble(tMap['amount']);
     }
 
-    final topExpenses = catTotals.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+    final topExpenses = catTotals.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
     final top3 = topExpenses.take(3).toList();
     final last5 = activeTx.take(5).toList();
 
@@ -769,11 +666,21 @@ class _UserPageState extends State<UserPage> {
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Hello, $_displayName 👋',
-                style: TextStyle(fontSize: 14, color: cs.onSurfaceVariant, fontWeight: FontWeight.w600)),
+            Text(
+              'Hello, $_displayName 👋',
+              style: TextStyle(
+                  fontSize: 14,
+                  color: cs.onSurfaceVariant,
+                  fontWeight: FontWeight.w600),
+            ),
             const SizedBox(height: 2),
-            Text('SmartBudget',
-                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: cs.onSurface)),
+            Text(
+              'SmartBudget',
+              style: TextStyle(
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                  color: cs.onSurface),
+            ),
           ],
         ),
         actions: [
@@ -781,7 +688,10 @@ class _UserPageState extends State<UserPage> {
             tooltip: 'Settings',
             icon: Icon(Icons.person_outline_rounded, color: cs.onSurface),
             onPressed: () async {
-              await Navigator.push(context, MaterialPageRoute(builder: (_) => const UserSettingsPage()));
+              await Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                      builder: (_) => const UserSettingsPage()));
             },
           ),
           IconButton(
@@ -791,7 +701,8 @@ class _UserPageState extends State<UserPage> {
               await NotificationService.instance.cancelAll();
               await AuthService().logout();
               if (context.mounted) {
-                Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => const AuthGate()));
+                Navigator.of(context).pushReplacement(
+                    MaterialPageRoute(builder: (_) => const AuthGate()));
               }
             },
           ),
@@ -805,7 +716,7 @@ class _UserPageState extends State<UserPage> {
               : RefreshIndicator(
                   onRefresh: () async {
                     _milestoneChecked = false;
-                    _inactiveChecked = false;
+                    _inactiveChecked  = false;
                     await _initializeData();
                   },
                   child: ListView(
@@ -816,10 +727,10 @@ class _UserPageState extends State<UserPage> {
                         month: _selectedMonth,
                         onChanged: (y, m) async {
                           setState(() {
-                            _selectedYear = y;
+                            _selectedYear  = y;
                             _selectedMonth = m;
-                            _predError = null;
-                            _predMessage = null;
+                            _predError     = null;
+                            _predMessage   = null;
                             _clearPredictionState();
                           });
                           await Future.wait([
@@ -840,58 +751,80 @@ class _UserPageState extends State<UserPage> {
                       _SectionCard(
                         title: 'Predictions',
                         icon: Icons.auto_awesome_rounded,
-                        headerTrailing: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                          decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(12),
-                            color: cs.surfaceContainerHighest.withValues(alpha: 0.45),
-                            border: Border.all(color: cs.primary.withValues(alpha: 0.15)),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(Icons.calendar_month_rounded, size: 16, color: cs.primary),
-                              const SizedBox(width: 6),
-                              Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Text('$_mlDaysCount / 30 days',
-                                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: cs.primary)),
-                                  Text(_mlReady ? 'ML Ready' : 'Training',
-                                      style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
-                                ],
-                              ),
-                            ],
-                          ),
+                        headerTrailing: _MlReadinessChip(
+                          daysCount: _mlDaysCount,
+                          isReady: _mlReady,
                         ),
                         child: _predLoading
-                            ? const Padding(padding: EdgeInsets.all(16), child: Center(child: CircularProgressIndicator()))
+                            ? const Padding(
+                                padding: EdgeInsets.all(16),
+                                child: Center(
+                                    child: CircularProgressIndicator()),
+                              )
                             : Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  if (_predMessage != null) _InfoBadge(message: _predMessage!, isDark: isDark, isError: false),
-                                  if (_predError != null) _InfoBadge(message: _predError!, isDark: isDark, isError: true),
-                                  if (displayNextDay == null && displayNextWeek == null && displayNextMonth == null)
-                                    Text('Keep logging transactions to unlock AI predictions.', style: TextStyle(color: t.hintColor))
+                                  if (_predMessage != null)
+                                    _InfoBadge(
+                                        message: _predMessage!,
+                                        isDark: isDark,
+                                        isError: false),
+                                  if (_predError != null)
+                                    _InfoBadge(
+                                        message: _predError!,
+                                        isDark: isDark,
+                                        isError: true),
+                                  if (displayNextDay == null &&
+                                      displayNextWeek == null &&
+                                      displayNextMonth == null)
+                                    Text(
+                                      'Keep logging transactions to unlock AI predictions.',
+                                      style: TextStyle(color: t.hintColor),
+                                    )
                                   else
                                     Row(
                                       children: [
-                                        Expanded(child: _MiniPredCard(title: 'Tomorrow', value: displayNextDay?.toString(), icon: Icons.today_rounded)),
+                                        Expanded(
+                                          child: _MiniPredCard(
+                                            title: 'Tomorrow',
+                                            value: displayNextDay?.toString(),
+                                            icon: Icons.today_rounded,
+                                          ),
+                                        ),
                                         const SizedBox(width: 10),
-                                        Expanded(child: _MiniPredCard(title: '1 Week', value: displayNextWeek?.toString(), icon: Icons.date_range_rounded)),
+                                        Expanded(
+                                          child: _MiniPredCard(
+                                            title: '1 Week',
+                                            value: displayNextWeek?.toString(),
+                                            icon: Icons.date_range_rounded,
+                                          ),
+                                        ),
                                         const SizedBox(width: 10),
-                                        Expanded(child: _MiniPredCard(title: isMonthMode ? 'This Month' : 'Month', value: displayNextMonth?.toString(), icon: Icons.calendar_month_rounded)),
+                                        Expanded(
+                                          child: _MiniPredCard(
+                                            title: isMonthMode
+                                                ? 'This Month'
+                                                : 'Month',
+                                            value: displayNextMonth?.toString(),
+                                            icon: Icons.calendar_month_rounded,
+                                          ),
+                                        ),
                                       ],
                                     ),
                                   const SizedBox(height: 16),
                                   SizedBox(
                                     width: double.infinity,
                                     child: FilledButton.icon(
-                                      icon: const Icon(Icons.analytics_rounded),
+                                      icon: const Icon(
+                                          Icons.analytics_rounded),
                                       label: const Text('More Details'),
                                       onPressed: () async {
-                                        await Navigator.push(context, MaterialPageRoute(builder: (_) => const PredictionDetailsPage()));
+                                        await Navigator.push(
+                                          context,
+                                          MaterialPageRoute(
+                                              builder: (_) =>
+                                                  const PredictionDetailsPage()),
+                                        );
                                       },
                                     ),
                                   ),
@@ -904,7 +837,8 @@ class _UserPageState extends State<UserPage> {
                         icon: Icons.show_chart_rounded,
                         actionText: 'RM ${netBalance.toStringAsFixed(2)}',
                         child: Padding(
-                          padding: const EdgeInsets.only(top: 8.0, right: 16),
+                          padding:
+                              const EdgeInsets.only(top: 8.0, right: 16),
                           child: _BalanceTrendChart(
                             tx: _txs,
                             asDouble: _asDouble,
@@ -919,7 +853,10 @@ class _UserPageState extends State<UserPage> {
                         title: 'Top Expenses',
                         icon: Icons.pie_chart_rounded,
                         child: _TopExpensesBars(
-                          top: top3.map((e) => MapEntry(_prettyCat(e.key), e.value)).toList(),
+                          top: top3
+                              .map((e) =>
+                                  MapEntry(_prettyCat(e.key), e.value))
+                              .toList(),
                           maxValue: top3.isEmpty ? 1 : top3.first.value,
                         ),
                       ),
@@ -927,7 +864,8 @@ class _UserPageState extends State<UserPage> {
                       _SectionCard(
                         title: 'Cash Flow',
                         icon: Icons.swap_vert_rounded,
-                        child: _CashFlowBars(income: incomeTotal, expense: expenseTotal),
+                        child: _CashFlowBars(
+                            income: incomeTotal, expense: expenseTotal),
                       ),
                       const SizedBox(height: 16),
                       _SectionCard(
@@ -936,17 +874,23 @@ class _UserPageState extends State<UserPage> {
                         actionText: isMonthMode ? 'Edit' : null,
                         onAction: isMonthMode ? _openTargetsEditor : null,
                         child: !isMonthMode
-                            ? Text('Targets are set monthly. Please select a specific month above.', style: TextStyle(color: t.hintColor))
+                            ? Text(
+                                'Targets are set monthly. Please select a specific month above.',
+                                style: TextStyle(color: t.hintColor),
+                              )
                             : _targetsLoading
-                                ? const Center(child: CircularProgressIndicator())
+                                ? const Center(
+                                    child: CircularProgressIndicator())
                                 : _targetsError != null
-                                    ? Text(_targetsError!, style: TextStyle(color: cs.error))
+                                    ? Text(_targetsError!,
+                                        style: TextStyle(color: cs.error))
                                     : _TargetsList(
                                         monthlyBudget: _monthlyBudget,
                                         targetRmByCat: _targetRmByCat,
                                         rawPctByCat: _rawPctByCat,
                                         rawAmtByCat: _rawAmtByCat,
-                                        spentByCategory: _spentByCategoryForMonth(monthTx),
+                                        spentByCategory:
+                                            _spentByCategoryForMonth(monthTx),
                                         prettyCat: _prettyCat,
                                       ),
                       ),
@@ -968,40 +912,58 @@ class _UserPageState extends State<UserPage> {
     );
   }
 }
-// ═════════════════════════════════════════════════════════════════════════════
-// LIVE METRIC ROW
-// ═════════════════════════════════════════════════════════════════════════════
 
-class _LiveMetricRow extends StatelessWidget {
-  final String label;
-  final String value;
-  final Color valueColor;
+// =============================================================================
+// ML READINESS CHIP
+// =============================================================================
 
-  const _LiveMetricRow({
-    required this.label,
-    required this.value,
-    required this.valueColor,
-  });
+class _MlReadinessChip extends StatelessWidget {
+  final int daysCount;
+  final bool isReady;
+
+  const _MlReadinessChip({required this.daysCount, required this.isReady});
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-      children: [
-        Text(label, style: TextStyle(color: cs.onSurfaceVariant)),
-        Text(
-          value,
-          style: TextStyle(fontWeight: FontWeight.bold, color: valueColor),
-        ),
-      ],
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        color: cs.surfaceContainerHighest.withValues(alpha: 0.45),
+        border: Border.all(color: cs.primary.withValues(alpha: 0.15)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.calendar_month_rounded, size: 16, color: cs.primary),
+          const SizedBox(width: 6),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                '$daysCount / 30 days',
+                style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                    color: cs.primary),
+              ),
+              Text(
+                isReady ? 'ML Ready' : 'Training',
+                style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 // INFO BADGE
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 class _InfoBadge extends StatelessWidget {
   final String message;
@@ -1021,7 +983,9 @@ class _InfoBadge extends StatelessWidget {
 
     final Color bg = isError
         ? cs.errorContainer.withValues(alpha: 0.35)
-        : (isDark ? Colors.white10 : Colors.black.withValues(alpha: 0.04));
+        : (isDark
+            ? Colors.white10
+            : Colors.black.withValues(alpha: 0.04));
     final Color fg = isError
         ? cs.onErrorContainer
         : (isDark ? Colors.white : Colors.black87);
@@ -1053,771 +1017,9 @@ class _InfoBadge extends StatelessWidget {
   }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// CONFIDENCE INTERVAL ROW
-// ═════════════════════════════════════════════════════════════════════════════
-
-class _ConfidenceIntervalRow extends StatelessWidget {
-  final double lower;
-  final double upper;
-  const _ConfidenceIntervalRow({required this.lower, required this.upper});
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: cs.surfaceContainerHighest.withValues(alpha: 0.5),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: cs.outlineVariant.withValues(alpha: 0.4)),
-      ),
-      child: Row(
-        children: [
-          Icon(Icons.area_chart_rounded,
-              size: 16, color: cs.onSurfaceVariant),
-          const SizedBox(width: 8),
-          Text(
-            '90% range: ',
-            style: TextStyle(
-                fontSize: 12,
-                color: cs.onSurfaceVariant,
-                fontWeight: FontWeight.w600),
-          ),
-          Text(
-            'RM ${lower.toStringAsFixed(2)} – RM ${upper.toStringAsFixed(2)}',
-            style: TextStyle(
-                fontSize: 12,
-                color: cs.onSurface,
-                fontWeight: FontWeight.bold),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// EXPLAINABILITY PANEL
-// ═════════════════════════════════════════════════════════════════════════════
-
-class _ExplainabilityPanel extends StatefulWidget {
-  final String? explanationText;
-  final List<Map<String, dynamic>> featureImportances;
-  final Map<String, dynamic>? weekendInfluence;
-  final List<Map<String, dynamic>> categoryImpact;
-
-  const _ExplainabilityPanel({
-    required this.explanationText,
-    required this.featureImportances,
-    required this.weekendInfluence,
-    required this.categoryImpact,
-  });
-
-  @override
-  State<_ExplainabilityPanel> createState() => _ExplainabilityPanelState();
-}
-
-class _ExplainabilityPanelState extends State<_ExplainabilityPanel> {
-  bool _expanded = false;
-
-  static double? _n(dynamic v) {
-    if (v == null) return null;
-    if (v is num) return v.toDouble();
-    return double.tryParse(v.toString());
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final cs    = Theme.of(context).colorScheme;
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-
-    return Container(
-      decoration: BoxDecoration(
-        color: isDark
-            ? cs.primary.withValues(alpha: 0.08)
-            : cs.primaryContainer.withValues(alpha: 0.35),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: cs.primary.withValues(alpha: 0.18)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          InkWell(
-            onTap: () => setState(() => _expanded = !_expanded),
-            borderRadius: BorderRadius.circular(16),
-            child: Padding(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-              child: Row(
-                children: [
-                  Icon(Icons.lightbulb_outline_rounded,
-                      size: 17, color: cs.primary),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      'Why this forecast?',
-                      style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.bold,
-                          color: cs.primary),
-                    ),
-                  ),
-                  Icon(
-                    _expanded
-                        ? Icons.keyboard_arrow_up_rounded
-                        : Icons.keyboard_arrow_down_rounded,
-                    size: 20,
-                    color: cs.primary.withValues(alpha: 0.7),
-                  ),
-                ],
-              ),
-            ),
-          ),
-
-          // Summary — always visible
-          if (widget.explanationText != null &&
-              widget.explanationText!.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(14, 0, 14, 12),
-              child: Text(
-                widget.explanationText!,
-                style: TextStyle(
-                    fontSize: 12.5,
-                    color: cs.onSurfaceVariant,
-                    height: 1.55),
-              ),
-            ),
-
-          // Expanded detail
-          if (_expanded) ...[
-            Divider(height: 1, color: cs.primary.withValues(alpha: 0.15)),
-            const SizedBox(height: 12),
-
-            // Feature importances
-            if (widget.featureImportances.isNotEmpty) ...[
-              _SubHeader(label: 'Top model drivers'),
-              ...widget.featureImportances.take(5).map((f) {
-                final pct =
-                    (_n(f['importance_pct']) ?? 0.0).clamp(0.0, 100.0);
-                return Padding(
-                  padding: const EdgeInsets.fromLTRB(14, 4, 14, 4),
-                  child: Row(
-                    children: [
-                      SizedBox(
-                        width: 140,
-                        child: Text(
-                          (f['label'] ?? f['feature'] ?? '').toString(),
-                          style: TextStyle(
-                              fontSize: 11.5, color: cs.onSurfaceVariant),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(4),
-                          child: LinearProgressIndicator(
-                            value: pct / 100,
-                            minHeight: 7,
-                            backgroundColor: cs.surfaceContainerHighest,
-                            color: cs.primary,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      SizedBox(
-                        width: 38,
-                        child: Text(
-                          '${pct.toStringAsFixed(0)}%',
-                          style: TextStyle(
-                              fontSize: 11.5,
-                              fontWeight: FontWeight.w600,
-                              color: cs.onSurfaceVariant),
-                          textAlign: TextAlign.right,
-                        ),
-                      ),
-                    ],
-                  ),
-                );
-              }),
-              const SizedBox(height: 12),
-            ],
-
-            // Weekend influence
-            if (widget.weekendInfluence != null &&
-                widget.weekendInfluence!.isNotEmpty) ...[
-              Divider(
-                  height: 1,
-                  indent: 14,
-                  endIndent: 14,
-                  color: cs.primary.withValues(alpha: 0.12)),
-              const SizedBox(height: 12),
-              _SubHeader(label: 'Weekend vs weekday'),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(14, 0, 14, 12),
-                child: _WeekendInfluenceRow(
-                    data: widget.weekendInfluence!),
-              ),
-            ],
-
-            // Category impact
-            if (widget.categoryImpact.isNotEmpty) ...[
-              Divider(
-                  height: 1,
-                  indent: 14,
-                  endIndent: 14,
-                  color: cs.primary.withValues(alpha: 0.12)),
-              const SizedBox(height: 12),
-              _SubHeader(label: 'Spending by category'),
-              ...widget.categoryImpact.map((c) {
-                final pct =
-                    (_n(c['share_pct']) ?? 0.0).clamp(0.0, 100.0);
-                final total = _n(c['total']) ?? 0.0;
-                return Padding(
-                  padding: const EdgeInsets.fromLTRB(14, 4, 14, 4),
-                  child: Row(
-                    children: [
-                      SizedBox(
-                        width: 110,
-                        child: Text(
-                          (c['category'] ?? '').toString(),
-                          style: TextStyle(
-                              fontSize: 11.5, color: cs.onSurfaceVariant),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(4),
-                          child: LinearProgressIndicator(
-                            value: pct / 100,
-                            minHeight: 7,
-                            backgroundColor: cs.surfaceContainerHighest,
-                            color: cs.tertiary,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        'RM ${total.toStringAsFixed(0)}',
-                        style: TextStyle(
-                            fontSize: 11, color: cs.onSurfaceVariant),
-                      ),
-                      const SizedBox(width: 4),
-                      SizedBox(
-                        width: 36,
-                        child: Text(
-                          '${pct.toStringAsFixed(0)}%',
-                          style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
-                              color: cs.onSurfaceVariant),
-                          textAlign: TextAlign.right,
-                        ),
-                      ),
-                    ],
-                  ),
-                );
-              }),
-              const SizedBox(height: 12),
-            ],
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-class _SubHeader extends StatelessWidget {
-  final String label;
-  const _SubHeader({required this.label});
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(14, 0, 14, 6),
-      child: Text(
-        label,
-        style: TextStyle(
-            fontSize: 11,
-            fontWeight: FontWeight.w700,
-            letterSpacing: 0.4,
-            color: cs.onSurfaceVariant),
-      ),
-    );
-  }
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// ANOMALY PANEL
-// ═════════════════════════════════════════════════════════════════════════════
-
-class _AnomalyPanel extends StatefulWidget {
-  final List<Map<String, dynamic>> anomalies;
-  const _AnomalyPanel({required this.anomalies});
-
-  @override
-  State<_AnomalyPanel> createState() => _AnomalyPanelState();
-}
-
-class _AnomalyPanelState extends State<_AnomalyPanel> {
-  bool _expanded = false;
-
-  static double? _n(dynamic v) {
-    if (v == null) return null;
-    if (v is num) return v.toDouble();
-    return double.tryParse(v.toString());
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-
-    return Container(
-      decoration: BoxDecoration(
-        color: cs.errorContainer.withValues(alpha: 0.25),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: cs.error.withValues(alpha: 0.25)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          InkWell(
-            onTap: () => setState(() => _expanded = !_expanded),
-            borderRadius: BorderRadius.circular(16),
-            child: Padding(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-              child: Row(
-                children: [
-                  Icon(Icons.warning_amber_rounded,
-                      size: 17, color: cs.error),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      '${widget.anomalies.length} unusual transaction${widget.anomalies.length == 1 ? '' : 's'} detected',
-                      style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.bold,
-                          color: cs.error),
-                    ),
-                  ),
-                  Icon(
-                    _expanded
-                        ? Icons.keyboard_arrow_up_rounded
-                        : Icons.keyboard_arrow_down_rounded,
-                    size: 20,
-                    color: cs.error.withValues(alpha: 0.7),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          if (_expanded) ...[
-            Divider(height: 1, color: cs.error.withValues(alpha: 0.15)),
-            const SizedBox(height: 8),
-            ...widget.anomalies.map((a) {
-              final amount   = _n(a['amount']) ?? 0.0;
-              final z        = _n(a['z_score']) ?? 0.0;
-              final category = (a['category'] ?? '').toString();
-              final date     = (a['date'] ?? '').toString();
-              return Padding(
-                padding: const EdgeInsets.fromLTRB(14, 4, 14, 8),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Icon(Icons.circle, size: 7, color: cs.error),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'RM ${amount.toStringAsFixed(2)}'
-                            '${category.isNotEmpty ? ' · $category' : ''}',
-                            style: TextStyle(
-                                fontSize: 12.5,
-                                fontWeight: FontWeight.w600,
-                                color: cs.onSurface),
-                          ),
-                          Text(
-                            '$date · z-score: ${z.toStringAsFixed(1)}σ',
-                            style: TextStyle(
-                                fontSize: 11, color: cs.onSurfaceVariant),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            }),
-            const SizedBox(height: 4),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// MONTHLY TREND PANEL — uses backend values directly, no client-side recompute
-// ═════════════════════════════════════════════════════════════════════════════
-
-class _MonthlyTrendPanel extends StatelessWidget {
-  final Map<String, dynamic> trend;
-  const _MonthlyTrendPanel({required this.trend});
-
-  static double? _n(dynamic v) {
-    if (v == null) return null;
-    if (v is num) return v.toDouble();
-    return double.tryParse(v.toString());
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-
-    final List<dynamic> monthly = (trend['monthly_totals'] is List)
-        ? trend['monthly_totals'] as List
-        : [];
-
-    // FIX: use backend-computed values instead of re-deriving client-side,
-    // which could contradict the server's own logic.
-    final String direction =
-        (trend['trend_direction'] ?? 'stable').toString();
-    final double pctChange = _n(trend['pct_change']) ?? 0.0;
-    final double slope     = _n(trend['slope']) ?? 0.0;
-
-    Color dirColor;
-    IconData dirIcon;
-    String dirLabel;
-
-    switch (direction) {
-      case 'increasing':
-        dirColor = cs.error;
-        dirIcon  = Icons.trending_up_rounded;
-        dirLabel = 'Increasing';
-        break;
-      case 'decreasing':
-        dirColor = Colors.green.shade600;
-        dirIcon  = Icons.trending_down_rounded;
-        dirLabel = 'Decreasing';
-        break;
-      default:
-        dirColor = cs.onSurfaceVariant;
-        dirIcon  = Icons.trending_flat_rounded;
-        dirLabel = 'Stable';
-    }
-
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: cs.surfaceContainerHighest.withValues(alpha: 0.4),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: cs.outlineVariant.withValues(alpha: 0.4)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(dirIcon, size: 18, color: dirColor),
-              const SizedBox(width: 8),
-              Text(
-                'Spending trend: ',
-                style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.bold,
-                    color: cs.onSurface),
-              ),
-              Text(
-                dirLabel,
-                style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.bold,
-                    color: dirColor),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'Change: ${pctChange >= 0 ? '+' : ''}${pctChange.toStringAsFixed(1)}%'
-            '   •   '
-            'Slope: RM ${slope.toStringAsFixed(2)}/month',
-            style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
-          ),
-          const SizedBox(height: 12),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: monthly.map((m) {
-              final month = (m['month'] ?? '').toString();
-              final total = _n(m['total']) ?? 0.0;
-              return Container(
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 10, vertical: 8),
-                decoration: BoxDecoration(
-                  color: cs.surface,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                      color: cs.outlineVariant.withValues(alpha: 0.3)),
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(month,
-                        style: TextStyle(
-                            fontSize: 11, color: cs.onSurfaceVariant)),
-                    const SizedBox(height: 2),
-                    Text(
-                      'RM ${total.toStringAsFixed(0)}',
-                      style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          color: cs.onSurface),
-                    ),
-                  ],
-                ),
-              );
-            }).toList(),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// METRICS PANEL
-// ═════════════════════════════════════════════════════════════════════════════
-
-class _MetricsPanel extends StatelessWidget {
-  final List<Map<String, dynamic>> metrics;
-  const _MetricsPanel({required this.metrics});
-
-  Color _scoreColor(double r2) {
-    if (r2 >= 0.8) return Colors.green;
-    if (r2 >= 0.6) return Colors.lightGreen;
-    if (r2 >= 0.4) return Colors.orange;
-    return Colors.red;
-  }
-
-  String _scoreLabel(double r2) {
-    if (r2 >= 0.8) return 'Excellent';
-    if (r2 >= 0.6) return 'Good';
-    if (r2 >= 0.4) return 'Moderate';
-    return 'Weak';
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    if (metrics.isEmpty) return const SizedBox.shrink();
-
-    // --- FIX: Sort accepted models by lowest MAE (error) first ---
-    final acceptedMetrics = metrics.where((m) => m['accepted'] == true).toList();
-    acceptedMetrics.sort((a, b) => (a['mae'] as num).compareTo(b['mae'] as num));
-
-    // Show the best accepted model; fall back to first entry if none accepted
-    final m = acceptedMetrics.isNotEmpty ? acceptedMetrics.first : metrics.first;
-    // -------------------------------------------------------------
-
-    final double r2      = double.tryParse(m['r2']?.toString() ?? '') ?? 0;
-    final String modelName = (m['model'] ?? 'Model').toString();
-
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(16),
-        color: cs.surfaceContainerHighest.withValues(alpha: 0.4),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Text(
-                'Prediction Accuracy',
-                style: TextStyle(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 15,
-                    color: cs.primary),
-              ),
-              const Spacer(),
-              Container(
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 8, vertical: 3),
-                decoration: BoxDecoration(
-                  color: _scoreColor(r2).withValues(alpha: 0.15),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  modelName,
-                  style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.bold,
-                      color: _scoreColor(r2)),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 14),
-          Row(
-            children: [
-              const Text('Model Quality: ',
-                  style: TextStyle(fontWeight: FontWeight.bold)),
-              Text(
-                _scoreLabel(r2),
-                style: TextStyle(
-                    color: _scoreColor(r2), fontWeight: FontWeight.bold),
-              ),
-            ],
-          ),
-          const SizedBox(height: 14),
-          _metricRow('MAE', m['mae']),
-          _metricRow('RMSE', m['rmse']),
-          _metricRow('MAPE', '${m['mape']}%'),
-          _metricRow('R² Score', m['r2']),
-        ],
-      ),
-    );
-  }
-
-  Widget _metricRow(String label, dynamic value) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 5),
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(label,
-                style: const TextStyle(fontWeight: FontWeight.w600)),
-          ),
-          Text(value?.toString() ?? '-'),
-        ],
-      ),
-    );
-  }
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// WEEKEND INFLUENCE WIDGETS
-// ═════════════════════════════════════════════════════════════════════════════
-
-class _WeekendInfluenceRow extends StatelessWidget {
-  final Map<String, dynamic> data;
-  const _WeekendInfluenceRow({required this.data});
-
-  double? _n(dynamic v) {
-    if (v == null) return null;
-    if (v is num) return v.toDouble();
-    return double.tryParse(v.toString());
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final cs         = Theme.of(context).colorScheme;
-    final weekdayAvg = _n(data['weekday_avg']) ?? 0.0;
-    final weekendAvg = _n(data['weekend_avg']) ?? 0.0;
-    final direction  = (data['direction'] ?? 'similar').toString();
-    final summary    = (data['summary'] ?? '').toString();
-
-    Color badgeColor;
-    Color badgeText;
-    IconData badgeIcon;
-
-    if (direction == 'higher') {
-      badgeColor = cs.errorContainer;
-      badgeText  = cs.onErrorContainer;
-      badgeIcon  = Icons.arrow_upward_rounded;
-    } else if (direction == 'lower') {
-      badgeColor = cs.primaryContainer;
-      badgeText  = cs.onPrimaryContainer;
-      badgeIcon  = Icons.arrow_downward_rounded;
-    } else {
-      badgeColor = cs.surfaceContainerHighest;
-      badgeText  = cs.onSurfaceVariant;
-      badgeIcon  = Icons.remove_rounded;
-    }
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: _WeekendStatChip(
-                  label: 'Weekday avg',
-                  value: 'RM ${weekdayAvg.toStringAsFixed(2)}'),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: _WeekendStatChip(
-                  label: 'Weekend avg',
-                  value: 'RM ${weekendAvg.toStringAsFixed(2)}'),
-            ),
-          ],
-        ),
-        const SizedBox(height: 8),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-          decoration: BoxDecoration(
-              color: badgeColor, borderRadius: BorderRadius.circular(10)),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(badgeIcon, size: 14, color: badgeText),
-              const SizedBox(width: 4),
-              Text(summary,
-                  style: TextStyle(
-                      fontSize: 11.5,
-                      fontWeight: FontWeight.w600,
-                      color: badgeText)),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _WeekendStatChip extends StatelessWidget {
-  final String label;
-  final String value;
-  const _WeekendStatChip({required this.label, required this.value});
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      decoration: BoxDecoration(
-        color: cs.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(label,
-              style:
-                  TextStyle(fontSize: 10.5, color: cs.onSurfaceVariant)),
-          const SizedBox(height: 2),
-          Text(value,
-              style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.bold,
-                  color: cs.onSurface)),
-        ],
-      ),
-    );
-  }
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 // DASHBOARD HERO CARD
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 class _DashboardHeroCard extends StatelessWidget {
   final String label;
@@ -1836,7 +1038,7 @@ class _DashboardHeroCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final cs         = Theme.of(context).colorScheme;
+    final cs = Theme.of(context).colorScheme;
     final isPositive = balance >= 0;
 
     return Container(
@@ -1869,8 +1071,7 @@ class _DashboardHeroCard extends StatelessWidget {
                     fontWeight: FontWeight.w600),
               ),
               Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                 decoration: BoxDecoration(
                   color: isPositive
                       ? Colors.white.withValues(alpha: 0.2)
@@ -1880,9 +1081,7 @@ class _DashboardHeroCard extends StatelessWidget {
                 child: Text(
                   isPositive ? 'Surplus' : 'Deficit',
                   style: TextStyle(
-                      color: isPositive
-                          ? Colors.green
-                          : cs.onErrorContainer,
+                      color: isPositive ? Colors.green : cs.onErrorContainer,
                       fontSize: 12,
                       fontWeight: FontWeight.bold),
                 ),
@@ -1903,32 +1102,7 @@ class _DashboardHeroCard extends StatelessWidget {
             style: TextStyle(
                 color: cs.onPrimary.withValues(alpha: 0.8), fontSize: 13),
           ),
-          const SizedBox(height: 12),
-          // "All-time savings" chip — clearly labelled to avoid confusion
-          // with the period-scoped balance shown above.
-          Container(
-            padding:
-                const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.15),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(Icons.savings_rounded, size: 16, color: cs.onPrimary),
-                const SizedBox(width: 6),
-                Text(
-                  'All-time savings: RM ${totalSavings.toStringAsFixed(2)}',
-                  style: TextStyle(
-                      color: cs.onPrimary,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 13),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 16), // was 12 -> before the savings badge; now before Income/Expense row
           Row(
             children: [
               Expanded(
@@ -1949,6 +1123,28 @@ class _DashboardHeroCard extends StatelessWidget {
                 ),
               ),
             ],
+          ),
+          const SizedBox(height: 12), // moved down here, after Income/Expense
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.15),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.savings_rounded, size: 16, color: cs.onPrimary),
+                const SizedBox(width: 6),
+                Text(
+                  'All-time savings: RM ${totalSavings.toStringAsFixed(2)}',
+                  style: TextStyle(
+                      color: cs.onPrimary,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 13),
+                ),
+              ],
+            ),
           ),
         ],
       ),
@@ -1984,19 +1180,19 @@ class _HeroStatBox extends StatelessWidget {
           Row(children: [
             Icon(icon, size: 16, color: iconColor),
             const SizedBox(width: 4),
-            Text(label,
-                style: TextStyle(
-                    color: cs.onPrimary.withValues(alpha: 0.9),
-                    fontSize: 13,
-                    fontWeight: FontWeight.w500)),
+            Text(
+              label,
+              style: TextStyle(
+                  color: cs.onPrimary.withValues(alpha: 0.9),
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500),
+            ),
           ]),
           const SizedBox(height: 4),
           Text(
             'RM ${value.toStringAsFixed(2)}',
             style: TextStyle(
-                color: cs.onPrimary,
-                fontSize: 18,
-                fontWeight: FontWeight.bold),
+                color: cs.onPrimary, fontSize: 18, fontWeight: FontWeight.bold),
           ),
         ],
       ),
@@ -2004,9 +1200,9 @@ class _HeroStatBox extends StatelessWidget {
   }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 // SECTION CARD
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 class _SectionCard extends StatelessWidget {
   final String title;
@@ -2017,7 +1213,6 @@ class _SectionCard extends StatelessWidget {
   final VoidCallback? onAction;
 
   const _SectionCard({
-    super.key,
     required this.title,
     required this.icon,
     required this.child,
@@ -2055,27 +1250,19 @@ class _SectionCard extends StatelessWidget {
                 child: Icon(icon, size: 18, color: cs.primary),
               ),
               const SizedBox(width: 12),
-              
-              // --- FIX APPLIED HERE ---
               Expanded(
                 child: Text(
                   title,
                   style: const TextStyle(
-                    fontSize: 16, 
-                    fontWeight: FontWeight.bold,
-                  ),
-                  maxLines: 1, // Forces text to stay on one line
-                  overflow: TextOverflow.ellipsis, // Adds '...' if it runs out of room
+                      fontSize: 16, fontWeight: FontWeight.bold),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
-              
               if (headerTrailing != null) ...[
                 headerTrailing!,
-                // I slightly adjusted this spacing logic to prevent random trailing 
-                // spaces if actionText is null.
-                if (actionText != null) const SizedBox(width: 8), 
+                if (actionText != null) const SizedBox(width: 8),
               ],
-              
               if (actionText != null)
                 InkWell(
                   onTap: onAction,
@@ -2099,9 +1286,9 @@ class _SectionCard extends StatelessWidget {
   }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 // MINI PREDICTION CARD
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 class _MiniPredCard extends StatelessWidget {
   final String title;
@@ -2119,15 +1306,14 @@ class _MiniPredCard extends StatelessWidget {
       decoration: BoxDecoration(
         color: cs.surfaceContainerHighest.withValues(alpha: 0.4),
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: cs.outlineVariant.withValues(alpha: 0.4)),
+        border:
+            Border.all(color: cs.outlineVariant.withValues(alpha: 0.4)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Icon(icon, size: 18, color: cs.onSurface),
           const SizedBox(height: 8),
-          
-          // Added FittedBox to the title just in case "This Month" is too wide
           FittedBox(
             fit: BoxFit.scaleDown,
             alignment: Alignment.centerLeft,
@@ -2139,10 +1325,7 @@ class _MiniPredCard extends StatelessWidget {
                   fontWeight: FontWeight.w600),
             ),
           ),
-          
           const SizedBox(height: 2),
-          
-          // Added FittedBox here to shrink the currency text instead of cutting it off
           FittedBox(
             fit: BoxFit.scaleDown,
             alignment: Alignment.centerLeft,
@@ -2163,9 +1346,9 @@ class _MiniPredCard extends StatelessWidget {
   }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 // TOP EXPENSES BARS
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 class _TopExpensesBars extends StatelessWidget {
   final List<MapEntry<String, double>> top;
@@ -2215,9 +1398,9 @@ class _TopExpensesBars extends StatelessWidget {
   }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 // CASH FLOW BARS
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 class _CashFlowBars extends StatelessWidget {
   final double income;
@@ -2273,11 +1456,12 @@ class _FlowRow extends StatelessWidget {
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text(label,
-                style: const TextStyle(fontWeight: FontWeight.bold)),
-            Text('RM ${value.toStringAsFixed(2)}',
-                style: TextStyle(
-                    fontWeight: FontWeight.bold, color: textColor)),
+            Text(label, style: const TextStyle(fontWeight: FontWeight.bold)),
+            Text(
+              'RM ${value.toStringAsFixed(2)}',
+              style:
+                  TextStyle(fontWeight: FontWeight.bold, color: textColor),
+            ),
           ],
         ),
         const SizedBox(height: 8),
@@ -2295,9 +1479,9 @@ class _FlowRow extends StatelessWidget {
   }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 // TARGETS LIST
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 class _TargetsList extends StatelessWidget {
   final double monthlyBudget;
@@ -2368,9 +1552,9 @@ class _TargetsList extends StatelessWidget {
   }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 // LAST RECORDS LIST
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 class _LastRecordsList extends StatelessWidget {
   final List<Map<String, dynamic>> items;
@@ -2418,9 +1602,8 @@ class _LastRecordsList extends StatelessWidget {
                       ? Icons.arrow_downward_rounded
                       : Icons.arrow_upward_rounded,
                   size: 16,
-                  color: isIncome
-                      ? Colors.green.shade700
-                      : cs.onSurfaceVariant,
+                  color:
+                      isIncome ? Colors.green.shade700 : cs.onSurfaceVariant,
                 ),
               ),
               const SizedBox(width: 12),
@@ -2450,14 +1633,15 @@ class _LastRecordsList extends StatelessWidget {
                     style: TextStyle(
                         fontWeight: FontWeight.bold,
                         fontSize: 14,
-                        color: isIncome
-                            ? Colors.green.shade700
-                            : cs.onSurface),
+                        color:
+                            isIncome ? Colors.green.shade700 : cs.onSurface),
                   ),
                   const SizedBox(height: 2),
-                  Text(date,
-                      style: TextStyle(
-                          color: Theme.of(context).hintColor, fontSize: 11)),
+                  Text(
+                    date,
+                    style: TextStyle(
+                        color: Theme.of(context).hintColor, fontSize: 11),
+                  ),
                 ],
               ),
             ],
@@ -2468,9 +1652,9 @@ class _LastRecordsList extends StatelessWidget {
   }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 // MONTH / YEAR PICKER
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 class _MonthYearPicker extends StatelessWidget {
   final int year;
@@ -2491,8 +1675,7 @@ class _MonthYearPicker extends StatelessWidget {
       showDragHandle: true,
       backgroundColor: cs.surface,
       shape: const RoundedRectangleBorder(
-          borderRadius:
-              BorderRadius.vertical(top: Radius.circular(28))),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
       builder: (ctx) {
         return SafeArea(
           child: ConstrainedBox(
@@ -2508,7 +1691,6 @@ class _MonthYearPicker extends StatelessWidget {
                   Expanded(
                     child: TabBarView(
                       children: [
-                        // Month grid
                         GridView.builder(
                           padding: const EdgeInsets.all(16),
                           physics: const BouncingScrollPhysics(),
@@ -2543,7 +1725,6 @@ class _MonthYearPicker extends StatelessWidget {
                             );
                           },
                         ),
-                        // Year grid — current year ± 6
                         GridView.builder(
                           padding: const EdgeInsets.all(16),
                           physics: const BouncingScrollPhysics(),
@@ -2688,9 +1869,9 @@ class _GridTile extends StatelessWidget {
   }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 // CHART WIDGETS
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 class _BalanceTrendChart extends StatelessWidget {
   final List<Map<String, dynamic>> tx;
@@ -2708,8 +1889,7 @@ class _BalanceTrendChart extends StatelessWidget {
   });
 
   int _daysInMonth(int y, int m) {
-    final next =
-        (m == 12) ? DateTime(y + 1, 1, 1) : DateTime(y, m + 1, 1);
+    final next = (m == 12) ? DateTime(y + 1, 1, 1) : DateTime(y, m + 1, 1);
     return next.difference(DateTime(y, m, 1)).inDays;
   }
 
@@ -2805,24 +1985,26 @@ LineChartBarData _sharedBarData(List<FlSpot> spots, BuildContext context) {
       cutOffY: 0,
       applyCutOffY: true,
       gradient: LinearGradient(
-          colors: [
-            cs.primary.withValues(alpha: 0.25),
-            cs.primary.withValues(alpha: 0.0)
-          ],
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter),
+        colors: [
+          cs.primary.withValues(alpha: 0.25),
+          cs.primary.withValues(alpha: 0.0),
+        ],
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+      ),
     ),
     aboveBarData: BarAreaData(
       show: true,
       cutOffY: 0,
       applyCutOffY: true,
       gradient: LinearGradient(
-          colors: [
-            cs.error.withValues(alpha: 0.0),
-            cs.error.withValues(alpha: 0.25)
-          ],
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter),
+        colors: [
+          cs.error.withValues(alpha: 0.0),
+          cs.error.withValues(alpha: 0.25),
+        ],
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+      ),
     ),
   );
 }
@@ -2953,8 +2135,8 @@ class _MonthTrend extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final now           = DateTime.now();
-    final isFutureMonth =
+    final now            = DateTime.now();
+    final isFutureMonth  =
         year > now.year || (year == now.year && month > now.month);
 
     double startingBalance = 0;

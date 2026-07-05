@@ -30,6 +30,116 @@ class _Hairline extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  MALAY NUMBER WORD -> DIGIT CONVERTER
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// On-device speech recognizers occasionally spell numbers out instead of
+// using digits (e.g. "lima puluh ribu" instead of "50000"). This utility
+// finds runs of Malay number-words in recognized text and converts them
+// to digits, so downstream NLP parsing always sees numeric amounts.
+//
+// Handles: units (satu..sembilan), belas (teens), puluh (tens),
+// ratus (hundreds), ribu (thousands), juta (millions), and the "se-"
+// prefix forms (sepuluh, sebelas, seratus, seribu, sejuta).
+class MalayNumberConverter {
+  static const Map<String, int> _units = {
+    'kosong': 0,
+    'satu': 1,
+    'dua': 2,
+    'tiga': 3,
+    'empat': 4,
+    'lima': 5,
+    'enam': 6,
+    'tujuh': 7,
+    'lapan': 8,
+    'sembilan': 9,
+    'se': 1,
+  };
+
+  static const Set<String> _multiplierWords = {'puluh', 'ratus', 'ribu', 'juta'};
+  static const String _teenWord = 'belas';
+
+  static const Map<String, int> _multiplierValues = {
+    'puluh': 10,
+    'ratus': 100,
+    'ribu': 1000,
+    'juta': 1000000,
+  };
+
+  /// Splits compound words like "seratus", "seribu", "sejuta", "sepuluh",
+  /// "sebelas" into "se" + the base word, so the tokenizer can treat them
+  /// uniformly (se = 1, then multiplied/added by the following word).
+  static String _splitSePrefix(String text) {
+    final pattern = RegExp(
+      r'\bse(ratus|ribu|juta|puluh|belas)\b',
+      caseSensitive: false,
+    );
+    return text.replaceAllMapped(pattern, (m) => 'se ${m.group(1)}');
+  }
+
+  /// Returns true if a lowercase word is part of a Malay number expression.
+  static bool _isNumberWord(String w) =>
+      _units.containsKey(w) || _multiplierWords.contains(w) || w == _teenWord;
+
+  /// Converts a contiguous list of number-word tokens into an integer.
+  static int _resolve(List<String> tokens) {
+    int total = 0;
+    int current = 0;
+
+    for (final tok in tokens) {
+      if (_units.containsKey(tok)) {
+        current += _units[tok]!;
+      } else if (tok == _teenWord) {
+        current += 10;
+      } else if (_multiplierWords.contains(tok)) {
+        final mult = _multiplierValues[tok]!;
+        if (mult >= 1000) {
+          total += (current == 0 ? 1 : current) * mult;
+          current = 0;
+        } else {
+          current = (current == 0 ? 1 : current) * mult;
+        }
+      }
+    }
+    return total + current;
+  }
+
+  /// Scans free text, replaces runs of Malay number-words with digits.
+  /// Non-number words (including "ringgit", "rm", item names) are left
+  /// untouched and act as boundaries between separate number runs.
+  static String normalize(String input) {
+    final prepped = _splitSePrefix(input);
+    final wordSplit = RegExp(r'(\s+)');
+    final parts = prepped.split(wordSplit);
+
+    final output = <String>[];
+    List<String> buffer = [];
+
+    void flushBuffer() {
+      if (buffer.isEmpty) return;
+      output.add(_resolve(buffer.map((w) => w.toLowerCase()).toList()).toString());
+      buffer = [];
+    }
+
+    for (final part in prepped.split(' ')) {
+      if (part.trim().isEmpty) {
+        continue;
+      }
+      final clean = part.toLowerCase().replaceAll(RegExp(r'[^a-z]'), '');
+      if (_isNumberWord(clean)) {
+        buffer.add(clean);
+      } else {
+        flushBuffer();
+        output.add(part);
+      }
+    }
+    flushBuffer();
+
+    return output.join(' ');
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  MAIN PAGE
 // ─────────────────────────────────────────────────────────────────────────────
 class QuickAddTransactionPage extends StatefulWidget {
@@ -122,7 +232,7 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
       'error_no_match',
       'error_audio',
     ];
-    
+
     if (ignoredErrors.any((e) => errorMsg.contains(e))) {
       setState(() => _isListening = false);
       return;
@@ -162,15 +272,22 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
       listenFor:      const Duration(seconds: 30),
       pauseFor:       const Duration(seconds: 3),
       onResult:       _onSpeechResult,
-      localeId:       'ms_MY', // 🔥 Set to Malay (Malaysia)
+      // 🔥 Malaysian English handles code-switched Malay/English speech
+      // ("Nasi lemak RM8", "Minyak kereta lima puluh") in a single pass
+      // far better than a pure ms_MY or en_US model does.
+      localeId:       'en_MY',
     );
   }
 
   void _onSpeechResult(dynamic result) {
     if (!mounted) return;
 
-    final spoken = (result.recognizedWords as String).trim();
-    if (spoken.isEmpty) return;
+    final rawSpoken = (result.recognizedWords as String).trim();
+    if (rawSpoken.isEmpty) return;
+
+    // 🔥 Convert any spelled-out Malay number words (ratus, ribu, puluh,
+    // belas, se- prefixes) into digits before they hit the text field.
+    final spoken = MalayNumberConverter.normalize(rawSpoken);
 
     final base    = _preSpeechText.isEmpty ? '' : '${_preSpeechText.trimRight()} ';
     final newText = '$base$spoken';
@@ -403,7 +520,7 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
   Widget _emptyState() {
     final t = Theme.of(context);
     final cs = t.colorScheme;
-    
+
     return Center(
       child: SingleChildScrollView(
         padding: const EdgeInsets.fromLTRB(20, 40, 20, 140),
@@ -507,7 +624,7 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
 
     return Container(
       decoration: BoxDecoration(
-        color: cs.surfaceContainerLowest.withOpacity(0.96), // Removed Blur for Performance
+        color: cs.surfaceContainerLowest.withOpacity(0.96),
         border: Border(top: BorderSide(color: cs.outlineVariant.withOpacity(0.5), width: 0.5)),
       ),
       child: SafeArea(
@@ -544,7 +661,7 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
                         fontSize:   15,
                         color:      cs.onSurface,
                         fontWeight: FontWeight.w400,
-                        height:     1.45), 
+                        height:     1.45),
                     decoration: InputDecoration(
                       hintText: _isListening
                           ? 'Mendengar...'
@@ -552,7 +669,7 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
                       hintStyle: TextStyle(
                           color:      t.hintColor,
                           fontSize:   15,
-                          fontWeight: FontWeight.w400), 
+                          fontWeight: FontWeight.w400),
                       border:         InputBorder.none,
                       contentPadding: const EdgeInsets.symmetric(
                           horizontal: 20, vertical: 14),
@@ -621,20 +738,20 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
               fontSize: 10.5,
               color:    cs.onSurfaceVariant,
               fontWeight: FontWeight.w400,
-              letterSpacing: 0.3)), 
+              letterSpacing: 0.3)),
     ]);
   }
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    
+
     return Scaffold(
-      resizeToAvoidBottomInset: true, 
+      resizeToAvoidBottomInset: true,
       backgroundColor: cs.surfaceContainerLowest,
       extendBodyBehindAppBar: true,
       appBar: AppBar(
-        backgroundColor: cs.surfaceContainerLowest.withOpacity(0.90), // Removed Blur
+        backgroundColor: cs.surfaceContainerLowest.withOpacity(0.90),
         elevation: 0,
         shape: Border(
           bottom: BorderSide(color: cs.outlineVariant.withOpacity(0.5), width: 0.5)
@@ -652,7 +769,7 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
                     fontSize:   16,
                     fontWeight: FontWeight.w600,
                     color:      cs.onSurface,
-                    letterSpacing: 0.1)), 
+                    letterSpacing: 0.1)),
             const SizedBox(height: 2),
             _statusRow(),
           ],
@@ -738,7 +855,7 @@ class _TypingDotsState extends State<_TypingDots>
                   fontSize: 13,
                   color:    cs.onSurfaceVariant,
                   fontWeight: FontWeight.w400,
-                  letterSpacing: 0.2)), 
+                  letterSpacing: 0.2)),
           const SizedBox(width: 7),
           ...List.generate(3, (i) {
             final phase   = i / 3;
@@ -789,7 +906,7 @@ class _UserBubble extends StatelessWidget {
               fontSize:   15,
               color:      cs.onPrimary,
               fontWeight: FontWeight.w500,
-              height:     1.5)), 
+              height:     1.5)),
     );
   }
 }
@@ -836,14 +953,14 @@ class _AiBubble extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(children: [
-            Text('✦', style: TextStyle(color: cs.primary, fontSize: 9)), 
+            Text('✦', style: TextStyle(color: cs.primary, fontSize: 9)),
             const SizedBox(width: 7),
             Text('AI',
                 style: TextStyle(
                     fontSize:   9.5,
                     color:      cs.onSurfaceVariant,
                     fontWeight: FontWeight.w700,
-                    letterSpacing: 2.2)), 
+                    letterSpacing: 2.2)),
           ]),
           const SizedBox(height: 10),
           Text(text, style: TextStyle(
@@ -921,7 +1038,7 @@ class _ConfirmButton extends StatelessWidget {
                     fontSize:   14.5,
                     fontWeight: FontWeight.w600,
                     color:      saved ? cs.onSurfaceVariant : cs.onPrimary,
-                    letterSpacing: 0.2), 
+                    letterSpacing: 0.2),
               ),
             ],
           ),
@@ -960,7 +1077,7 @@ class _SuggestionPill extends StatelessWidget {
                   fontSize:   13,
                   color:      cs.onSurfaceVariant,
                   fontWeight: FontWeight.w400,
-                  letterSpacing: 0.1)), 
+                  letterSpacing: 0.1)),
         ]),
       ),
     );
@@ -1065,7 +1182,7 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
   Widget build(BuildContext context) {
     final t = Theme.of(context);
     final cs = t.colorScheme;
-    
+
     final rawDesc  = (widget.data['description'] ?? 'Transaction').toString().trim();
     final catIcon  = widget.categoryIcons[_selectedCat] ?? Icons.category_rounded;
     final validCat = widget.categoryIcons.containsKey(_selectedCat)
@@ -1094,9 +1211,8 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
                   ),
                   child: Icon(catIcon, color: cs.onSurfaceVariant, size: 16),
                 ),
-                const SizedBox(width: 8), 
-                
-                // ── POPUP MENU BUTTON ──
+                const SizedBox(width: 8),
+
                 Expanded(
                   child: Theme(
                     data: t.copyWith(
@@ -1139,10 +1255,9 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
                           ),
                         );
                       }).toList(),
-                      // What the user sees before clicking
                       child: Container(
                         padding: const EdgeInsets.symmetric(vertical: 8),
-                        color: Colors.transparent, 
+                        color: Colors.transparent,
                         child: Row(
                           children: [
                             Expanded(
@@ -1171,9 +1286,8 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
                     ),
                   ),
                 ),
-                const SizedBox(width: 8), 
+                const SizedBox(width: 8),
 
-                // ── AMOUNT INPUT ──
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                   decoration: BoxDecoration(
@@ -1196,7 +1310,6 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
                         child: TextField(
                           controller:   _amtCtrl,
                           keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                          // 🔥 FIX: Added Input Formatter so users can't type invalid decimals like '12..50'
                           inputFormatters: [
                             FilteringTextInputFormatter.allow(RegExp(r'^\d+\.?\d{0,2}')),
                           ],
@@ -1246,7 +1359,7 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
                               fontSize:   12,
                               color:      cs.onSurfaceVariant,
                               fontWeight: FontWeight.w500,
-                              letterSpacing: 0.2)), 
+                              letterSpacing: 0.2)),
                     ]),
                   ),
                 ),
@@ -1260,7 +1373,7 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
                     style: TextStyle(
                         fontSize:   13,
                         color:      cs.onSurfaceVariant,
-                        fontWeight: FontWeight.w400), 
+                        fontWeight: FontWeight.w400),
                   ),
                 ),
               ],

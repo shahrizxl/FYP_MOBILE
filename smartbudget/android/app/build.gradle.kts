@@ -1,6 +1,5 @@
 plugins {
     id("com.android.application")
-    id("kotlin-android")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
 }
@@ -33,8 +32,6 @@ android {
     buildTypes {
         release {
             signingConfig = signingConfigs.getByName("debug")
-            
-            // ✅ FIXED: Proper Kotlin syntax for shrinking and ProGuard rules
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro")
         }

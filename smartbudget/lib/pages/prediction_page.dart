@@ -44,7 +44,6 @@ class _PredictionDetailsPageState extends State<PredictionDetailsPage> {
   double? _predNextMonthUpper;
   String? _predExplanationText;
   List<Map<String, dynamic>> _predFeatureImportances = [];
-  List<Map<String, dynamic>> _predictionMetrics = [];
   Map<String, dynamic>? _predWeekendInfluence;
   List<Map<String, dynamic>> _predCategoryImpact = [];
   List<Map<String, dynamic>> _predAnomalies = [];
@@ -208,7 +207,6 @@ class _PredictionDetailsPageState extends State<PredictionDetailsPage> {
     _predNextMonthUpper = null;
     _predExplanationText = null;
     _predFeatureImportances = [];
-    _predictionMetrics = [];
     _predWeekendInfluence = null;
     _predCategoryImpact = [];
     _predAnomalies = [];
@@ -223,7 +221,7 @@ class _PredictionDetailsPageState extends State<PredictionDetailsPage> {
     Uri uri,
     Map<String, dynamic> body, {
     int maxAttempts = 2,
-    Duration timeout = const Duration(seconds: 30),
+    Duration timeout = const Duration(seconds: 60),
     Duration retryDelay = const Duration(seconds: 2),
   }) async {
     for (int attempt = 0; attempt < maxAttempts; attempt++) {
@@ -353,7 +351,6 @@ class _PredictionDetailsPageState extends State<PredictionDetailsPage> {
       final msg = (data['message'] ?? '').toString().trim();
 
       // Safely parse top level arrays
-      final metrics   = _parseJsonList(data['metrics']);
       final anomalies = _parseJsonList(data['anomalies']);
 
       String? explanationText;
@@ -364,10 +361,10 @@ class _PredictionDetailsPageState extends State<PredictionDetailsPage> {
       if (data['explainability'] is Map) {
         final expl = Map<String, dynamic>.from(data['explainability']);
         explanationText = expl['explanation_text']?.toString();
-        
+
         featureImportances = _parseJsonList(expl['feature_importances']);
         categoryImpact     = _parseJsonList(expl['category_impact']);
-        
+
         if (expl['weekend_influence'] is Map) {
           weekendInfluence = Map<String, dynamic>.from(expl['weekend_influence']);
         }
@@ -394,7 +391,6 @@ class _PredictionDetailsPageState extends State<PredictionDetailsPage> {
         _predNextMonth       = nm;
         _predNextMonthLower  = nml;
         _predNextMonthUpper  = nmu;
-        _predictionMetrics   = metrics;
         _predLoading         = false;
         _predMessage         = msg.isEmpty ? null : msg;
         _predError           = null;
@@ -435,7 +431,9 @@ class _PredictionDetailsPageState extends State<PredictionDetailsPage> {
   }
 
   Future<void> _refresh() async {
-    _clearPredictionState();
+    setState(() {
+      _clearPredictionState();
+    });
     await Future.wait([
       _loadTx(),
       _loadBudget(),
@@ -468,13 +466,13 @@ class _PredictionDetailsPageState extends State<PredictionDetailsPage> {
     final bool showExplain = !isFuture &&
         !_predLoading &&
         ((_predExplanationText?.isNotEmpty ?? false) || _predFeatureImportances.isNotEmpty);
-    
+
     final bool showAnomalies =
         !isFuture && !_predLoading && _predAnomalies.isNotEmpty;
-    
+
     final bool showTrend =
         !isFuture && !_predLoading && _predMonthlyTrend != null;
-    
+
     final bool showLiveMetrics = !isFuture &&
         !_predLoading &&
         (_actualSpentSoFar != null ||
@@ -584,7 +582,7 @@ class _PredictionDetailsPageState extends State<PredictionDetailsPage> {
                                         Expanded(
                                           child: _MiniPredCard(
                                             title: 'Tomorrow',
-                                            value: displayNextDay?.toString(),
+                                            value: displayNextDay,
                                             icon:  Icons.today_rounded,
                                           ),
                                         ),
@@ -592,7 +590,7 @@ class _PredictionDetailsPageState extends State<PredictionDetailsPage> {
                                         Expanded(
                                           child: _MiniPredCard(
                                             title: '1 Week',
-                                            value: displayNextWeek?.toString(),
+                                            value: displayNextWeek,
                                             icon:  Icons.date_range_rounded,
                                           ),
                                         ),
@@ -602,7 +600,7 @@ class _PredictionDetailsPageState extends State<PredictionDetailsPage> {
                                             title: isMonthMode
                                                 ? 'This Month'
                                                 : 'Month',
-                                            value: displayNextMonth?.toString(),
+                                            value: displayNextMonth,
                                             icon:  Icons.calendar_month_rounded,
                                           ),
                                         ),
@@ -631,12 +629,6 @@ class _PredictionDetailsPageState extends State<PredictionDetailsPage> {
                         const SizedBox(height: 16),
                       ],
 
-                      // ── Prediction Accuracy ────────────────────────────
-                      if (_predictionMetrics.isNotEmpty) ...[
-                        _MetricsPanel(metrics: _predictionMetrics),
-                        const SizedBox(height: 16),
-                      ],
-
                       // ── Anomalies ──────────────────────────────────────
                       if (showAnomalies) ...[
                         _AnomalyPanel(anomalies: _predAnomalies),
@@ -652,7 +644,7 @@ class _PredictionDetailsPageState extends State<PredictionDetailsPage> {
                       // ── Live Metrics ───────────────────────────────────
                       if (showLiveMetrics) ...[
                         _PredSection(
-                          title: 'Live Prediction Metrics',
+                          title: 'This Month So Far',
                           icon:  Icons.speed_rounded,
                           child: Column(
                             children: [
@@ -663,7 +655,7 @@ class _PredictionDetailsPageState extends State<PredictionDetailsPage> {
                               ),
                               const SizedBox(height: 8),
                               _LiveMetricRow(
-                                label:      'Predicted Remaining',
+                                label:      'Expected to Spend',
                                 value:      'RM ${(_remainingPrediction ?? 0).toStringAsFixed(2)}',
                                 valueColor: cs.onSurface,
                               ),
@@ -698,8 +690,7 @@ class _PredictionDetailsPageState extends State<PredictionDetailsPage> {
                           !showExplain &&
                           !showAnomalies &&
                           !showTrend &&
-                          !showLiveMetrics &&
-                          _predictionMetrics.isEmpty)
+                          !showLiveMetrics)
                         Center(
                           child: Padding(
                             padding: const EdgeInsets.symmetric(vertical: 32),
@@ -792,7 +783,7 @@ class _MLReadinessCard extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  mlReady ? 'ML Model Ready' : 'Training in Progress',
+                  mlReady ? 'Your Predictions Are Ready' : 'Learning Your Habits',
                   style: TextStyle(
                       fontSize:   15,
                       fontWeight: FontWeight.bold,
@@ -801,8 +792,8 @@ class _MLReadinessCard extends StatelessWidget {
                 const SizedBox(height: 4),
                 Text(
                   mlReady
-                      ? 'Predictions are powered by your full spending history.'
-                      : '$daysCount / 30 active spending days recorded — $daysRemaining more to go.',
+                      ? 'We\'re using your full spending history to predict what\'s next.'
+                      : 'Log expenses on $daysCount out of 30 days so far — $daysRemaining more to go before predictions turn on.',
                   style: TextStyle(
                       fontSize: 12.5,
                       color:    cs.onSurfaceVariant,
@@ -1106,7 +1097,7 @@ class _PredSection extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────────────────────
 class _MiniPredCard extends StatelessWidget {
   final String title;
-  final String? value;
+  final double? value;
   final IconData icon;
 
   const _MiniPredCard({
@@ -1146,9 +1137,7 @@ class _MiniPredCard extends StatelessWidget {
             fit:       BoxFit.scaleDown,
             alignment: Alignment.centerLeft,
             child: Text(
-              value == null
-                  ? '-'
-                  : 'RM ${double.tryParse(value!)?.toStringAsFixed(2) ?? value}',
+              value == null ? '-' : 'RM ${value!.toStringAsFixed(2)}',
               style: TextStyle(
                   fontSize:   14,
                   fontWeight: FontWeight.bold,
@@ -1234,17 +1223,14 @@ class _ConfidenceIntervalRow extends StatelessWidget {
           Icon(Icons.area_chart_rounded,
               size: 16, color: cs.onSurfaceVariant),
           const SizedBox(width: 8),
-          Text('90% range: ',
+          Expanded(
+            child: Text(
+              'Likely between RM ${lower.toStringAsFixed(2)} and RM ${upper.toStringAsFixed(2)}',
               style: TextStyle(
                   fontSize:   12,
-                  color:      cs.onSurfaceVariant,
-                  fontWeight: FontWeight.w600)),
-          Text(
-            'RM ${lower.toStringAsFixed(2)} – RM ${upper.toStringAsFixed(2)}',
-            style: TextStyle(
-                fontSize:   12,
-                color:      cs.onSurface,
-                fontWeight: FontWeight.bold),
+                  color:      cs.onSurface,
+                  fontWeight: FontWeight.w600),
+            ),
           ),
         ],
       ),
@@ -1364,7 +1350,7 @@ class _ExplainabilityPanelState extends State<_ExplainabilityPanel> {
             Divider(height: 1, color: cs.primary.withValues(alpha: 0.15)),
             const SizedBox(height: 12),
             if (widget.featureImportances.isNotEmpty) ...[
-              const _SubHeader(label: 'Top model drivers'),
+              const _SubHeader(label: 'What affects your spending most'),
               ...widget.featureImportances.take(5).map((f) {
                 final pct =
                     (_n(f['importance_pct']) ?? 0.0).clamp(0.0, 100.0);
@@ -1551,8 +1537,8 @@ class _AnomalyPanelState extends State<_AnomalyPanel> {
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      '${widget.anomalies.length} unusual transaction'
-                      '${widget.anomalies.length == 1 ? '' : 's'} detected',
+                      '${widget.anomalies.length} unusual expense'
+                      '${widget.anomalies.length == 1 ? '' : 's'} spotted',
                       style: TextStyle(
                           fontSize:   13,
                           fontWeight: FontWeight.bold,
@@ -1575,7 +1561,6 @@ class _AnomalyPanelState extends State<_AnomalyPanel> {
             const SizedBox(height: 8),
             ...widget.anomalies.map((a) {
               final amount   = _n(a['amount']) ?? 0.0;
-              final z        = _n(a['z_score']) ?? 0.0;
               final category = (a['category'] ?? '').toString();
               final dt       = (a['date'] ?? '').toString();
               return Padding(
@@ -1598,7 +1583,7 @@ class _AnomalyPanelState extends State<_AnomalyPanel> {
                                 color:      cs.onSurface),
                           ),
                           Text(
-                            '$dt · z-score: ${z.toStringAsFixed(1)}σ',
+                            '$dt · higher than usual for this category',
                             style: TextStyle(
                                 fontSize: 11,
                                 color:    cs.onSurfaceVariant),
@@ -1641,7 +1626,6 @@ class _MonthlyTrendPanel extends StatelessWidget {
     final String direction =
         (trend['trend_direction'] ?? 'stable').toString();
     final double pctChange = _n(trend['pct_change']) ?? 0.0;
-    final double slope     = _n(trend['slope']) ?? 0.0;
 
     Color    dirColor;
     IconData dirIcon;
@@ -1651,17 +1635,17 @@ class _MonthlyTrendPanel extends StatelessWidget {
       case 'increasing':
         dirColor = cs.error;
         dirIcon  = Icons.trending_up_rounded;
-        dirLabel = 'Increasing';
+        dirLabel = 'Going up';
         break;
       case 'decreasing':
         dirColor = Colors.green.shade600;
         dirIcon  = Icons.trending_down_rounded;
-        dirLabel = 'Decreasing';
+        dirLabel = 'Going down';
         break;
       default:
         dirColor = cs.onSurfaceVariant;
         dirIcon  = Icons.trending_flat_rounded;
-        dirLabel = 'Stable';
+        dirLabel = 'Staying steady';
     }
 
     return Container(
@@ -1678,7 +1662,7 @@ class _MonthlyTrendPanel extends StatelessWidget {
             children: [
               Icon(dirIcon, size: 18, color: dirColor),
               const SizedBox(width: 8),
-              Text('Spending trend: ',
+              Text('Your spending is: ',
                   style: TextStyle(
                       fontSize:   13,
                       fontWeight: FontWeight.bold,
@@ -1692,10 +1676,11 @@ class _MonthlyTrendPanel extends StatelessWidget {
           ),
           const SizedBox(height: 8),
           Text(
-            'Change: ${pctChange >= 0 ? '+' : ''}${pctChange.toStringAsFixed(1)}%'
-            '   •   '
-            'Slope: RM ${slope.toStringAsFixed(2)}/month',
-            style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+            direction == 'stable'
+                ? 'Your spending has stayed about the same over the last few months.'
+                : 'Spending has ${direction == 'increasing' ? 'increased' : 'decreased'} '
+                  'by about ${pctChange.abs().toStringAsFixed(0)}% over the last few months.',
+            style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant, height: 1.4),
           ),
           const SizedBox(height: 12),
           Wrap(
@@ -1730,184 +1715,6 @@ class _MonthlyTrendPanel extends StatelessWidget {
               );
             }).toList(),
           ),
-        ],
-      ),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// METRICS PANEL
-// ─────────────────────────────────────────────────────────────────────────────
-class _MetricsPanel extends StatelessWidget {
-  final List<Map<String, dynamic>> metrics;
-  const _MetricsPanel({required this.metrics});
-
-  // FIX (Bug 1): The old _scoreLabel used ratio > 1.00 → "Weak", but the
-  // backend accepts models up to ratio 1.15 (FALLBACK_TOL) and labels them
-  // "Moderate".  Any accepted model in the 1.00–1.15 band was being shown as
-  // "Weak" in the UI even when predictions were close to actual values.
-  //
-  // Primary fix: use the backend's own `quality` string ("Strong" / "Moderate"
-  // / "Weak" / "Unverified") which is already computed with the correct
-  // thresholds.  The ratio is kept only for the color gradient on the badge.
-  //
-  // FIX (Bug 4): Added the "Unverified" case (returned when there is too
-  // little data for CV but the model was still fitted).  The old code fell
-  // through to ratio-based scoring which produced misleading "Excellent" labels
-  // because both mae and baseline_mae were 0 in that path.
-
-  static double _qualityRatio(Map<String, dynamic> m) {
-    final mae      = (m['mae']          as num?)?.toDouble() ?? 0.0;
-    final baseline = (m['baseline_mae'] as num?)?.toDouble() ?? 1.0;
-    if (baseline <= 0) return 1.0;
-    return mae / baseline;
-  }
-
-  static String _backendQualityLabel(Map<String, dynamic> m) {
-      final q = (m['quality'] ?? '').toString().trim();
-      switch (q) {
-        case 'Excellent':         return 'Excellent';
-        case 'Strong':            return 'Strong';
-        case 'Moderate':          return 'Moderate';
-        case 'Needs Improvement': return 'Needs Improvement';
-        case 'Unverified':        return 'Unverified';
-        default:                  break;
-      }
-      final ratio = _qualityRatio(m);
-      if (ratio <= 0.70) return 'Strong';
-      if (ratio <= 0.85) return 'Good';
-      if (ratio <= 1.15) return 'Moderate';
-      return 'Needs Improvement';
-    }
-
-  static Color _colorForLabel(String label, ColorScheme cs) {
-      switch (label) {
-        case 'Excellent':         return Colors.green;
-        case 'Strong':            return Colors.lightGreen;
-        case 'Good':              return Colors.lightGreen;
-        case 'Moderate':          return Colors.orange;
-        case 'Needs Improvement': return cs.error;
-        case 'Unverified':        return Colors.blueGrey;
-        default:                  return cs.error;
-      }
-    }
-
-  static String _formatMape(dynamic raw) {
-    if (raw == null) return '-';
-    final v = (raw as num?)?.toDouble() ?? double.tryParse(raw.toString());
-    if (v == null) return '-';
-    return '${v.toStringAsFixed(1)}%';
-  }
-
-  static String _formatMae(dynamic raw) {
-    if (raw == null) return '-';
-    final v = (raw as num?)?.toDouble() ?? double.tryParse(raw.toString());
-    if (v == null) return '-';
-    return 'RM ${v.toStringAsFixed(2)}';
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    if (metrics.isEmpty) return const SizedBox.shrink();
-
-    final acceptedMetrics =
-        metrics.where((m) => m['accepted'] == true).toList();
-    acceptedMetrics.sort((a, b) {
-      final aMae = (a['mae'] as num?)?.toDouble() ?? double.infinity;
-      final bMae = (b['mae'] as num?)?.toDouble() ?? double.infinity;
-      return aMae.compareTo(bMae);
-    });
-    final m =
-        acceptedMetrics.isNotEmpty ? acceptedMetrics.first : metrics.first;
-
-    final label     = _backendQualityLabel(m);
-    final color     = _colorForLabel(label, cs);
-    final modelName = (m['model'] ?? 'Model').toString();
-    final cvFolds   = m['cv_folds']?.toString() ?? '-';
-    final note      = m['note']?.toString();
-
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(16),
-        color:        cs.surfaceContainerHighest.withValues(alpha: 0.4),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Header row
-          Row(
-            children: [
-              Text('Prediction Accuracy',
-                  style: TextStyle(
-                      fontWeight: FontWeight.bold,
-                      fontSize:   15,
-                      color:      cs.primary)),
-              const Spacer(),
-              Container(
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 8, vertical: 3),
-                decoration: BoxDecoration(
-                  color:        color.withValues(alpha: 0.15),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(modelName,
-                    style: TextStyle(
-                        fontSize:   11,
-                        fontWeight: FontWeight.bold,
-                        color:      color)),
-              ),
-            ],
-          ),
-          const SizedBox(height: 14),
-
-          // Quality badge
-          Row(
-            children: [
-              const Text('Model Quality: ',
-                  style: TextStyle(fontWeight: FontWeight.bold)),
-              Text(label,
-                  style: TextStyle(
-                      color:      color,
-                      fontWeight: FontWeight.bold)),
-            ],
-          ),
-          const SizedBox(height: 14),
-
-          // Metric rows — hide MAE/MAPE for Unverified (both are 0.0, meaningless)
-          if (label != 'Unverified') ...[
-            _metricRow('MAE',          _formatMae(m['mae'])),
-            _metricRow('Baseline MAE', _formatMae(m['baseline_mae'])),
-            _metricRow('MAPE',         _formatMape(m['mape'])),
-            _metricRow('CV Folds',     cvFolds),
-          ] else ...[
-            _metricRow('CV Folds', cvFolds),
-          ],
-
-          if (note != null && note.isNotEmpty) ...[
-            const SizedBox(height: 8),
-            Text(note,
-                style: TextStyle(
-                    fontSize: 11,
-                    color:    cs.onSurfaceVariant,
-                    fontStyle: FontStyle.italic)),
-          ],
-        ],
-      ),
-    );
-  }
-
-  Widget _metricRow(String label, String value) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 5),
-      child: Row(
-        children: [
-          Expanded(
-              child: Text(label,
-                  style: const TextStyle(fontWeight: FontWeight.w600))),
-          Text(value),
         ],
       ),
     );
