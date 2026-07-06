@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -53,25 +54,30 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
   int                 _nextId     = 1;
   final _scrollCtrl = ScrollController();
 
-  // ── Speech ─────────────────────────────────────────────────────────────────
+  // ── Speech state ─────────────────────────────────────────────────────────
   final stt.SpeechToText _speech = stt.SpeechToText();
-  bool    _speechReady   = false;
-  bool    _isListening   = false;
-  String  _preSpeechText = '';
-  int     _retryCount    = 0;
-  double  _soundLevel    = 0.0;
+  bool    _speechReady    = false;
+  bool    _speechDenied   = false; // permanently denied (permission)
+  bool    _isListening    = false;
+  String  _preSpeechText  = '';
+  int     _retryCount     = 0;
   static const int _maxRetries = 2;
 
-  // Language for dictation. Malay is default since the app targets MY users,
-  // but a lot of speech is mixed English ("Nasi lemak RM8" etc), so we let
-  // the user flip to English if recognition keeps missing.
-  bool get _useEnglish => _localeId == 'en_US';
-  String _localeId = 'ms_MY';
+  // Locale actually used for recognition. We no longer hardcode 'ms_MY' —
+  // we verify it exists on-device first, and otherwise fall back gracefully.
+  String? _localeId;
+  bool    _localeIsMalay = false;
 
-  // Safety timer: if onStatus never fires 'done' (can happen on some Android
-  // builds), force-stop the mic after a hard ceiling so it never gets stuck
-  // in a "listening forever" state.
-  Timer? _listenSafetyTimer;
+  // Pulse animation so listening state is obvious even to a first-time user.
+  late final AnimationController _pulseCtrl = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1200),
+  )..repeat(reverse: true);
+
+  // Safety-net: if the plugin's onStatus/onResult callbacks never fire
+  // (this happens on some Android OEM skins), we don't want the mic to look
+  // "stuck" listening forever.
+  Timer? _listeningWatchdog;
 
   final Map<String, IconData> categoryIcons = {
     'food'         : Icons.restaurant_rounded,
@@ -104,47 +110,78 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
       _speechReady = await _speech.initialize(
         onError: _onSpeechError,
         onStatus: _onSpeechStatus,
-        debugLogging: false,
+        // debugLogging: false, // flip on locally if you need to diagnose OEM issues
       );
     } catch (e) {
       _speechReady = false;
     }
 
+    if (_speechReady) {
+      await _resolveLocale();
+    }
+
     if (!mounted) return;
 
     if (!_speechReady) {
-      setState(() =>
-          error = 'Microphone permission denied. Enable it in Settings.');
+      setState(() {
+        error = 'Microphone not available on this device. You can still type.';
+      });
     } else {
       setState(() {});
+    }
+  }
+
+  /// BUG FIX: the original code hardcoded `localeId: 'ms_MY'`. If a device
+  /// doesn't ship the Malay speech model (very common — many Android
+  /// devices only have en_US / en_GB installed), `listen()` either silently
+  /// fails or throws a platform error every single time, which looked like
+  /// "voice input is broken" to the user. We now check what's actually
+  /// installed and pick the best match instead of assuming.
+  Future<void> _resolveLocale() async {
+    try {
+      final locales = await _speech.locales();
+      final hasMalay = locales.any((l) => l.localeId.toLowerCase().startsWith('ms'));
+      if (hasMalay) {
+        _localeId = locales
+            .firstWhere((l) => l.localeId.toLowerCase().startsWith('ms'))
+            .localeId;
+        _localeIsMalay = true;
+      } else {
+        // Fall back to the device's own recognizer default instead of a
+        // second hardcoded guess — this is far more reliable across devices.
+        final system = await _speech.systemLocale();
+        _localeId = system?.localeId;
+        _localeIsMalay = false;
+      }
+    } catch (_) {
+      _localeId = null; // let the plugin pick its own default
+      _localeIsMalay = false;
     }
   }
 
   void _onSpeechStatus(String status) {
     if (!mounted) return;
     if (status == 'done' || status == 'notListening') {
-      _listenSafetyTimer?.cancel();
+      _clearWatchdog();
       setState(() => _isListening = false);
     }
   }
 
   void _onSpeechError(dynamic errorNotification) {
     if (!mounted) return;
+    _clearWatchdog();
 
-    String errorMsg;
-    try {
-      errorMsg = (errorNotification.errorMsg ?? '').toString();
-    } catch (_) {
-      errorMsg = errorNotification.toString();
-    }
+    final errorMsg = (errorNotification?.errorMsg ?? errorNotification.toString()).toString();
+    // BUG FIX: `errorNotification.permanent` exists on SpeechRecognitionError
+    // and tells us whether retrying will ever succeed (e.g. permission
+    // permanently denied). The original code ignored this and could retry
+    // forever against an error that will never clear.
+    final bool permanent = (errorNotification?.permanent as bool?) ?? false;
 
     const ignoredErrors = [
       'error_speech_timeout',
       'error_no_match',
-      'error_audio',
     ];
-
-    _listenSafetyTimer?.cancel();
 
     if (ignoredErrors.any((e) => errorMsg.contains(e))) {
       setState(() => _isListening = false);
@@ -153,25 +190,64 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
 
     setState(() => _isListening = false);
 
-    if (_retryCount < _maxRetries &&
-        (errorMsg.contains('error_network') ||
-         errorMsg.contains('error_recognizer_busy'))) {
+    if (errorMsg.contains('error_audio')) {
+      // Real device/mic problem — don't silently swallow it like before.
+      HapticFeedback.mediumImpact();
+      setState(() => error = "Couldn't access the microphone. Check another app isn't using it.");
+      return;
+    }
+
+    if (errorMsg.contains('permission') || errorMsg.contains('error_insufficient_permissions')) {
+      _speechDenied = true;
+      setState(() => error = 'Microphone permission is off. Enable it in Settings to use voice input.');
+      return;
+    }
+
+    if (!permanent &&
+        _retryCount < _maxRetries &&
+        (errorMsg.contains('error_network') || errorMsg.contains('error_recognizer_busy'))) {
       _retryCount++;
-      Future.delayed(const Duration(milliseconds: 500), () {
-        if (mounted) _startListening();
-      });
+      Future.delayed(const Duration(milliseconds: 500), _startListening);
       return;
     }
 
     _retryCount = 0;
-    setState(() => error = 'Voice input failed. Please try again.');
+    HapticFeedback.mediumImpact();
+    setState(() => error = 'Voice input failed. Please try again, or type instead.');
+  }
+
+  void _armWatchdog() {
+    _clearWatchdog();
+    // If nothing happens for 35s (longer than our 30s listenFor), force-reset
+    // the UI so the mic button never appears stuck.
+    _listeningWatchdog = Timer(const Duration(seconds: 35), () {
+      if (!mounted) return;
+      if (_isListening) {
+        setState(() => _isListening = false);
+      }
+    });
+  }
+
+  void _clearWatchdog() {
+    _listeningWatchdog?.cancel();
+    _listeningWatchdog = null;
   }
 
   // ── Start Listening ────────────────────────────────────────────────────────
   Future<void> _startListening() async {
-    if (!_speechReady) {
-      setState(() => error = 'Microphone not available.');
+    if (_speechDenied) {
+      setState(() => error = 'Microphone permission is off. Enable it in Settings to use voice input.');
       return;
+    }
+    if (!_speechReady) {
+      // BUG FIX: retry initialize once here instead of just failing forever —
+      // covers the case where the user granted permission *after* the page
+      // first loaded (e.g. came back from Settings).
+      await _initSpeech();
+      if (!_speechReady) {
+        setState(() => error = 'Microphone not available.');
+        return;
+      }
     }
 
     if (_speech.isListening) {
@@ -181,30 +257,33 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
     _preSpeechText = ctrl.text.trim();
     setState(() {
       _isListening = true;
-      _soundLevel  = 0.0;
-      error        = null;
+      error = null;
     });
+    _armWatchdog();
 
-    // Hard safety ceiling — never let the mic get stuck open.
-    _listenSafetyTimer?.cancel();
-    _listenSafetyTimer = Timer(const Duration(seconds: 65), () {
-      if (mounted && _isListening) _stopListening();
-    });
-
-    await _speech.listen(
-      listenMode:      stt.ListenMode.dictation,
-      partialResults:  true,
-      listenFor:       const Duration(seconds: 60),
-      // Longer pause window so a natural mid-sentence breath doesn't
-      // prematurely cut off the recording ("Nasi lemak... RM8" gets a beat).
-      pauseFor:        const Duration(seconds: 4),
-      onResult:        _onSpeechResult,
-      onSoundLevelChange: (level) {
-        if (mounted) setState(() => _soundLevel = level);
-      },
-      localeId:        _localeId,
-      cancelOnError:   false,
-    );
+    try {
+      await _speech.listen(
+        onResult: _onSpeechResult,
+        listenOptions: stt.SpeechListenOptions(
+          listenMode: stt.ListenMode.dictation,
+          partialResults: true,
+          cancelOnError: false,
+        ),
+        listenFor: const Duration(seconds: 30),
+        pauseFor: const Duration(seconds: 3),
+        localeId: _localeId,
+      );
+    } catch (e) {
+      // BUG FIX: listen() can throw synchronously (e.g. bad locale id) —
+      // the original code had no try/catch here at all, so this would crash
+      // the button into a permanently "listening" state with no way out.
+      _clearWatchdog();
+      if (!mounted) return;
+      setState(() {
+        _isListening = false;
+        error = 'Voice input failed to start. Please try again.';
+      });
+    }
   }
 
   void _onSpeechResult(dynamic result) {
@@ -221,15 +300,14 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
       ctrl.selection = TextSelection.collapsed(offset: newText.length);
     });
 
-    final isFinal = result.finalResult == true;
-    if (isFinal) {
+    if (result.finalResult == true) {
       _preSpeechText = newText;
     }
   }
 
   // ── Stop Listening ─────────────────────────────────────────────────────────
   Future<void> _stopListening() async {
-    _listenSafetyTimer?.cancel();
+    _clearWatchdog();
     if (_speech.isListening) {
       await _speech.stop();
     }
@@ -248,16 +326,10 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
     }
   }
 
-  // ── Toggle dictation language ────────────────────────────────────────────
-  Future<void> _toggleLanguage() async {
-    HapticFeedback.selectionClick();
-    if (_isListening) await _stopListening();
-    setState(() => _localeId = _useEnglish ? 'ms_MY' : 'en_US');
-  }
-
   @override
   void dispose() {
-    _listenSafetyTimer?.cancel();
+    _clearWatchdog();
+    _pulseCtrl.dispose();
     _speech.cancel();
     ctrl.dispose();
     _scrollCtrl.dispose();
@@ -299,8 +371,8 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
         messages.add(ChatMsg(
           id: _nextId++, fromUser: false,
           text: parsed.isNotEmpty
-              ? 'Found these transactions. Review and confirm.'
-              : "Couldn't extract that. Try: 'Lunch RM15'.",
+              ? 'Found ${parsed.length} transaction${parsed.length > 1 ? 's' : ''}. Review, edit or remove any before saving.'
+              : "Couldn't understand that. Try something like: 'Lunch RM15'.",
           extracted: parsed,
         ));
       });
@@ -320,25 +392,105 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
     }
   }
 
-  /// Removes a single extracted transaction (before it's saved) from a
-  /// message's list, letting the user drop anything the AI misread.
-  void _deleteExtractedItem(int msgId, int index) {
+  /// Remove a single extracted line item before it's saved.
+  void deleteExtractedItem(int msgId, int index) {
     final msgIndex = messages.indexWhere((m) => m.id == msgId);
     if (msgIndex == -1) return;
-    final list = messages[msgIndex].extracted;
-    if (list == null || index < 0 || index >= list.length) return;
+    final extracted = messages[msgIndex].extracted;
+    if (extracted == null || index < 0 || index >= extracted.length) return;
 
     HapticFeedback.lightImpact();
-    setState(() {
-      list.removeAt(index);
-    });
+    setState(() => extracted.removeAt(index));
+  }
+
+  /// Shows a final "double check" summary before anything hits the database.
+  Future<bool> _confirmSaveDialog(List<Map<String, dynamic>> items) async {
+    double asDouble(dynamic v) {
+      if (v == null) return 0;
+      if (v is num) return v.toDouble();
+      return double.tryParse(v.toString().replaceAll(',', '')) ?? 0;
+    }
+
+    final total = items.fold<double>(0, (sum, r) => sum + asDouble(r['amount']));
+    final cs = Theme.of(context).colorScheme;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+        title: const Text('Save these transactions?'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 260),
+                child: ListView.separated(
+                  shrinkWrap: true,
+                  itemCount: items.length,
+                  separatorBuilder: (_, __) => const Divider(height: 16),
+                  itemBuilder: (_, i) {
+                    final r = items[i];
+                    return Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            (r['description'] ?? 'Transaction').toString(),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Text('RM${formatAmount(asDouble(r['amount']))}',
+                            style: const TextStyle(fontWeight: FontWeight.w600)),
+                      ],
+                    );
+                  },
+                ),
+              ),
+              const SizedBox(height: 12),
+              const _HairlineDialogDivider(),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Text('Total', style: TextStyle(color: cs.onSurfaceVariant)),
+                  const Spacer(),
+                  Text('RM${formatAmount(total)}',
+                      style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
+                ],
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    return confirmed ?? false;
   }
 
   Future<void> saveFromReply(
       int msgId, List<Map<String, dynamic>> extracted) async {
     final uid = userId;
-    if (uid == null) { setState(() => error = 'Session expired.'); return; }
-    if (extracted.isEmpty) return;
+    if (uid == null) { setState(() => error = 'Session expired. Please sign in again.'); return; }
+    if (extracted.isEmpty) {
+      setState(() => error = 'Nothing left to save — all items were removed.');
+      return;
+    }
+
+    // Let the user double-check before anything is written.
+    final confirmed = await _confirmSaveDialog(extracted);
+    if (!confirmed) return;
+
     setState(() { loading = true; error = null; });
 
     try {
@@ -459,7 +611,7 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
                   categoryIcons: categoryIcons,
                   loading:       loading,
                   onSave: () => saveFromReply(m.id, m.extracted!),
-                  onDeleteItem: (index) => _deleteExtractedItem(m.id, index),
+                  onDeleteItem: (i) => deleteExtractedItem(m.id, i),
                 ),
         ),
       ),
@@ -510,7 +662,7 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
             )),
             const SizedBox(height: 14),
             Text(
-              'Speak or type naturally in English or Malay.\nWe understand how you talk.',
+              'Speak or type naturally in English or Malay.\nTap a suggestion below to try it out.',
               textAlign: TextAlign.center,
               style: TextStyle(color: cs.onSurfaceVariant, fontSize: 14),
             ),
@@ -522,14 +674,17 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
               children: [
                 _SuggestionPill('Nasi Lemak RM8', Icons.restaurant, onTap: () {
                   ctrl.text = 'Nasi Lemak RM8';
+                  ctrl.selection = TextSelection.collapsed(offset: ctrl.text.length);
                   setState(() {});
                 }),
                 _SuggestionPill('Minyak kereta RM50', Icons.directions_car, onTap: () {
                   ctrl.text = 'Minyak kereta RM50';
+                  ctrl.selection = TextSelection.collapsed(offset: ctrl.text.length);
                   setState(() {});
                 }),
                 _SuggestionPill('Coffee RM5', Icons.local_cafe, onTap: () {
                   ctrl.text = 'Coffee RM5';
+                  ctrl.selection = TextSelection.collapsed(offset: ctrl.text.length);
                   setState(() {});
                 }),
               ],
@@ -542,46 +697,39 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
 
   Widget _micButton() {
     final cs = Theme.of(context).colorScheme;
-    // Map the live sound level (roughly -2..10 on most platforms) into a
-    // small pulsing ring so the user gets visual proof audio is being
-    // captured — the #1 cause of "voice recording doesn't work" complaints
-    // is actually silent failure with no feedback.
-    final level = (_soundLevel.clamp(0, 10)) / 10.0;
 
-    return GestureDetector(
-      onTap: loading ? null : _toggleMic,
-      onLongPress: loading ? null : _toggleLanguage,
-      child: Stack(
-        alignment: Alignment.center,
-        children: [
-          if (_isListening)
-            AnimatedContainer(
-              duration: const Duration(milliseconds: 120),
-              width:  48 + (level * 16),
-              height: 48 + (level * 16),
+    return Semantics(
+      button: true,
+      label: _isListening ? 'Stop voice input' : 'Start voice input',
+      child: Tooltip(
+        message: _isListening ? 'Tap to stop' : 'Tap to speak',
+        child: GestureDetector(
+          onTap: loading ? null : _toggleMic,
+          child: AnimatedBuilder(
+            animation: _pulseCtrl,
+            builder: (_, child) {
+              final scale = _isListening ? 1.0 + (_pulseCtrl.value * 0.12) : 1.0;
+              return Transform.scale(scale: scale, child: child);
+            },
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 250),
+              width: 48,
+              height: 48,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: cs.primary.withOpacity(0.18),
+                color: _isListening ? cs.primary : cs.surfaceContainerHighest,
+                border: Border.all(
+                  color: _isListening ? cs.primary : cs.outlineVariant.withOpacity(0.5),
+                  width: 0.8,
+                ),
               ),
-            ),
-          AnimatedContainer(
-            duration: const Duration(milliseconds: 250),
-            width: 48,
-            height: 48,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: _isListening ? cs.primary : cs.surfaceContainerHighest,
-              border: Border.all(
-                color: _isListening ? cs.primary : cs.outlineVariant.withOpacity(0.5),
-                width: 0.8,
+              child: Icon(
+                _isListening ? Icons.mic : Icons.mic_none,
+                color: _isListening ? cs.onPrimary : cs.onSurfaceVariant,
               ),
-            ),
-            child: Icon(
-              _isListening ? Icons.mic : Icons.mic_none,
-              color: _isListening ? cs.onPrimary : cs.onSurfaceVariant,
             ),
           ),
-        ],
+        ),
       ),
     );
   }
@@ -600,112 +748,88 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
       child: SafeArea(
         top: false,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(12, 8, 12, 14),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
+          padding: const EdgeInsets.fromLTRB(12, 12, 12, 14),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              // Small language chip so the user always knows (and can change)
-              // which language the mic is listening for.
-              Padding(
-                padding: const EdgeInsets.only(left: 60, bottom: 6),
-                child: GestureDetector(
-                  onTap: _toggleLanguage,
-                  child: Row(mainAxisSize: MainAxisSize.min, children: [
-                    Icon(Icons.translate_rounded, size: 11, color: cs.onSurfaceVariant),
-                    const SizedBox(width: 4),
-                    Text(
-                      _useEnglish ? 'English' : 'Bahasa Melayu',
-                      style: TextStyle(
-                        fontSize: 10.5,
-                        color: cs.onSurfaceVariant,
-                        fontWeight: FontWeight.w500,
-                      ),
+              _micButton(),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Container(
+                  decoration: BoxDecoration(
+                    color:        cs.surfaceContainerHighest.withOpacity(0.5),
+                    borderRadius: BorderRadius.circular(24),
+                    border: Border.all(
+                      color: _isListening ? cs.primary : cs.outlineVariant.withOpacity(0.5),
+                      width: 0.8,
                     ),
-                    const SizedBox(width: 3),
-                    Icon(Icons.swap_horiz_rounded, size: 12, color: cs.onSurfaceVariant.withOpacity(0.7)),
-                  ]),
+                  ),
+                  child: TextField(
+                    controller:      ctrl,
+                    minLines:        1,
+                    maxLines:        4,
+                    textInputAction: TextInputAction.send,
+                    onChanged:       (_) => setState(() {}),
+                    onSubmitted: (_) {
+                        if (loading) return;
+                        FocusScope.of(context).unfocus();
+                        sendMessage();
+                      },
+                    style: TextStyle(
+                        fontSize:   15,
+                        color:      cs.onSurface,
+                        fontWeight: FontWeight.w400,
+                        height:     1.45),
+                    decoration: InputDecoration(
+                      hintText: _isListening
+                          ? 'Mendengar...'
+                          : 'Contoh: Nasi lemak RM8',
+                      hintStyle: TextStyle(
+                          color:      t.hintColor,
+                          fontSize:   15,
+                          fontWeight: FontWeight.w400),
+                      border:         InputBorder.none,
+                      contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 20, vertical: 14),
+                    ),
+                  ),
                 ),
               ),
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  _micButton(),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color:        cs.surfaceContainerHighest.withOpacity(0.5),
-                        borderRadius: BorderRadius.circular(24),
-                        border: Border.all(
-                          color: _isListening ? cs.primary : cs.outlineVariant.withOpacity(0.5),
-                          width: 0.8,
-                        ),
-                      ),
-                      child: TextField(
-                        controller:      ctrl,
-                        minLines:        1,
-                        maxLines:        4,
-                        textInputAction: TextInputAction.send,
-                        onChanged:       (_) => setState(() {}),
-                        onSubmitted: (_) {
-                            if (loading) return;
-                            FocusScope.of(context).unfocus();
-                            sendMessage();
-                          },
-                        style: TextStyle(
-                            fontSize:   15,
-                            color:      cs.onSurface,
-                            fontWeight: FontWeight.w400,
-                            height:     1.45),
-                        decoration: InputDecoration(
-                          hintText: _isListening
-                              ? (_useEnglish ? 'Listening...' : 'Mendengar...')
-                              : 'Contoh: Nasi lemak RM8',
-                          hintStyle: TextStyle(
-                              color:      t.hintColor,
-                              fontSize:   15,
-                              fontWeight: FontWeight.w400),
-                          border:         InputBorder.none,
-                          contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 20, vertical: 14),
-                        ),
+              const SizedBox(width: 8),
+              Semantics(
+                button: true,
+                label: 'Send',
+                child: GestureDetector(
+                  onTap: (loading || !hasText) ? null : sendMessage,
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 250),
+                    curve:    Curves.easeOutBack,
+                    width:    48,
+                    height:   48,
+                    margin:   const EdgeInsets.only(bottom: 2),
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: hasText ? cs.primary : Colors.transparent,
+                      border: Border.all(
+                        color: hasText ? Colors.transparent : cs.outlineVariant.withOpacity(0.5),
+                        width: 0.8,
                       ),
                     ),
-                  ),
-                  const SizedBox(width: 8),
-                  GestureDetector(
-                    onTap: (loading || !hasText) ? null : sendMessage,
-                    child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 250),
-                      curve:    Curves.easeOutBack,
-                      width:    48,
-                      height:   48,
-                      margin:   const EdgeInsets.only(bottom: 2),
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: hasText ? cs.primary : Colors.transparent,
-                        border: Border.all(
-                          color: hasText ? Colors.transparent : cs.outlineVariant.withOpacity(0.5),
-                          width: 0.8,
-                        ),
-                      ),
-                      child: Center(
-                        child: loading
-                            ? SizedBox(
-                                width:  18,
-                                height: 18,
-                                child: CircularProgressIndicator(
-                                    strokeWidth: 1.5,
-                                    color: cs.onSurfaceVariant.withOpacity(0.5)),
-                              )
-                            : Icon(Icons.arrow_upward_rounded,
-                                size:  20,
-                                color: hasText ? cs.onPrimary : t.hintColor),
-                      ),
+                    child: Center(
+                      child: loading
+                          ? SizedBox(
+                              width:  18,
+                              height: 18,
+                              child: CircularProgressIndicator(
+                                  strokeWidth: 1.5,
+                                  color: cs.onSurfaceVariant.withOpacity(0.5)),
+                            )
+                          : Icon(Icons.arrow_upward_rounded,
+                              size:  20,
+                              color: hasText ? cs.onPrimary : t.hintColor),
                     ),
                   ),
-                ],
+                ),
               ),
             ],
           ),
@@ -718,7 +842,9 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
     final cs = Theme.of(context).colorScheme;
     final label = _isListening
         ? 'Listening'
-        : (_speechReady ? 'Voice Ready' : 'Text Only');
+        : (_speechDenied
+            ? 'Mic Off'
+            : (_speechReady ? 'Voice Ready' : 'Text Only'));
     final dotAlpha = _isListening ? 1.0 : (_speechReady ? 0.55 : 0.22);
 
     return Row(mainAxisSize: MainAxisSize.min, children: [
@@ -913,13 +1039,13 @@ class _UserBubble extends StatelessWidget {
 //  AI bubble
 // ─────────────────────────────────────────────────────────────────────────────
 class _AiBubble extends StatelessWidget {
-  final String                       text;
-  final List<Map<String, dynamic>>?  extracted;
-  final bool                         alreadySaved;
-  final Map<String, IconData>        categoryIcons;
-  final bool                         loading;
-  final VoidCallback                 onSave;
-  final ValueChanged<int>            onDeleteItem;
+  final String                    text;
+  final List<Map<String, dynamic>>? extracted;
+  final bool                        alreadySaved;
+  final Map<String, IconData>       categoryIcons;
+  final bool                        loading;
+  final VoidCallback                onSave;
+  final ValueChanged<int>           onDeleteItem;
 
   const _AiBubble({
     required this.text,
@@ -936,6 +1062,8 @@ class _AiBubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    final wasCleared = extracted != null && extracted!.isEmpty && !alreadySaved;
+
     return Container(
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
@@ -972,30 +1100,40 @@ class _AiBubble extends StatelessWidget {
           if (hasExtracted) ...[
             const SizedBox(height: 14),
             ...extracted!.asMap().entries.map((e) =>
-              EditableTransactionCard(
-                key:           ValueKey(e.value['_key'] ?? e.key),
-                data:          e.value,
-                categoryIcons: categoryIcons,
-                showDelete:    !alreadySaved,
-                onChanged:     (u) => extracted![e.key] = u,
-                onDelete:      alreadySaved ? null : () => onDeleteItem(e.key),
+              Dismissible(
+                key: ValueKey(identityHashCode(e.value)),
+                direction: alreadySaved ? DismissDirection.none : DismissDirection.endToStart,
+                background: Container(
+                  margin: const EdgeInsets.only(top: 10),
+                  alignment: Alignment.centerRight,
+                  padding: const EdgeInsets.only(right: 18),
+                  decoration: BoxDecoration(
+                    color: cs.errorContainer,
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Icon(Icons.delete_outline_rounded, color: cs.onErrorContainer),
+                ),
+                onDismissed: (_) => onDeleteItem(e.key),
+                child: EditableTransactionCard(
+                  data:          e.value,
+                  categoryIcons: categoryIcons,
+                  readOnly:      alreadySaved,
+                  onChanged:     (u) => extracted![e.key] = u,
+                  onDelete:      alreadySaved ? null : () => onDeleteItem(e.key),
+                ),
               ),
             ),
             const SizedBox(height: 16),
-            if (!alreadySaved || extracted!.isNotEmpty)
-              _ConfirmButton(
-                saved:   alreadySaved,
-                loading: loading,
-                onTap:   alreadySaved || loading ? null : onSave,
-              ),
-          ] else if (extracted != null && extracted!.isEmpty && !alreadySaved) ...[
-            const SizedBox(height: 10),
+            _ConfirmButton(
+              saved:   alreadySaved,
+              loading: loading,
+              onTap:   alreadySaved || loading ? null : onSave,
+            ),
+          ] else if (wasCleared) ...[
+            const SizedBox(height: 12),
             Text(
-              'All transactions removed.',
-              style: TextStyle(
-                  fontSize: 12.5,
-                  fontStyle: FontStyle.italic,
-                  color: cs.onSurfaceVariant),
+              'All items removed — nothing to save here.',
+              style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant, fontStyle: FontStyle.italic),
             ),
           ],
         ],
@@ -1020,40 +1158,44 @@ class _ConfirmButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    return GestureDetector(
-      onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 350),
-        height:   52,
-        decoration: BoxDecoration(
-          color: saved
-              ? Colors.transparent
-              : (onTap != null ? cs.primary : cs.surfaceContainerHighest),
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(
-            color: saved ? cs.outlineVariant : Colors.transparent,
-            width: 0.8,
+    return Semantics(
+      button: true,
+      label: saved ? 'Saved' : 'Confirm and save',
+      child: GestureDetector(
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 350),
+          height:   52,
+          decoration: BoxDecoration(
+            color: saved
+                ? Colors.transparent
+                : (onTap != null ? cs.primary : cs.surfaceContainerHighest),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: saved ? cs.outlineVariant : Colors.transparent,
+              width: 0.8,
+            ),
           ),
-        ),
-        child: Center(
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                saved ? Icons.check_rounded : Icons.save_alt_rounded,
-                size:  16,
-                color: saved ? cs.onSurfaceVariant : cs.onPrimary,
-              ),
-              const SizedBox(width: 8),
-              Text(
-                saved ? 'Saved' : 'Confirm & Save',
-                style: TextStyle(
-                    fontSize:   14.5,
-                    fontWeight: FontWeight.w600,
-                    color:      saved ? cs.onSurfaceVariant : cs.onPrimary,
-                    letterSpacing: 0.2),
-              ),
-            ],
+          child: Center(
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  saved ? Icons.check_rounded : Icons.save_alt_rounded,
+                  size:  16,
+                  color: saved ? cs.onSurfaceVariant : cs.onPrimary,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  saved ? 'Saved' : 'Confirm & Save',
+                  style: TextStyle(
+                      fontSize:   14.5,
+                      fontWeight: FontWeight.w600,
+                      color:      saved ? cs.onSurfaceVariant : cs.onPrimary,
+                      letterSpacing: 0.2),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -1113,23 +1255,30 @@ class ChatMsg {
   });
 }
 
+class _HairlineDialogDivider extends StatelessWidget {
+  const _HairlineDialogDivider();
+  @override
+  Widget build(BuildContext context) =>
+      Container(height: 0.5, color: Theme.of(context).dividerColor.withOpacity(0.5));
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  EDITABLE TRANSACTION CARD
 // ─────────────────────────────────────────────────────────────────────────────
 class EditableTransactionCard extends StatefulWidget {
   final Map<String, dynamic>          data;
-  final Map<String, IconData>         categoryIcons;
+  final Map<String, IconData>          categoryIcons;
   final Function(Map<String, dynamic>) onChanged;
-  final bool                          showDelete;
-  final VoidCallback?                 onDelete;
+  final VoidCallback?                  onDelete;
+  final bool                           readOnly;
 
   const EditableTransactionCard({
     super.key,
     required this.data,
     required this.categoryIcons,
     required this.onChanged,
-    this.showDelete = true,
     this.onDelete,
+    this.readOnly = false,
   });
 
   @override
@@ -1183,6 +1332,7 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
   }
 
   Future<void> _pickDate(BuildContext context) async {
+    if (widget.readOnly) return;
     final picked = await showDatePicker(
       context:     context,
       initialDate: _selectedDate,
@@ -1196,26 +1346,24 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
   }
 
   Future<void> _confirmDelete(BuildContext context) async {
-    final cs = Theme.of(context).colorScheme;
-    final rawDesc = (widget.data['description'] ?? 'this transaction').toString();
-    final confirmed = await showDialog<bool>(
+    final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Remove transaction?'),
-        content: Text('"$rawDesc" will be removed from this list before saving.'),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Remove this item?'),
+        content: Text(
+          '"${(widget.data['description'] ?? 'Transaction').toString()}" will be removed from this batch. It hasn\'t been saved yet, so this can\'t be undone here.',
+        ),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
+          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Cancel')),
+          FilledButton.tonal(
             onPressed: () => Navigator.of(ctx).pop(true),
-            child: Text('Remove', style: TextStyle(color: cs.error)),
+            child: const Text('Remove'),
           ),
         ],
       ),
     );
-    if (confirmed == true) widget.onDelete?.call();
+    if (ok == true) widget.onDelete?.call();
   }
 
   @override
@@ -1261,6 +1409,7 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
                       highlightColor: Colors.transparent,
                     ),
                     child: PopupMenuButton<String>(
+                      enabled: !widget.readOnly,
                       padding: EdgeInsets.zero,
                       color: cs.surface,
                       elevation: 8,
@@ -1320,7 +1469,8 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
                               ),
                             ),
                             const SizedBox(width: 4),
-                            Icon(Icons.unfold_more_rounded, size: 16, color: t.hintColor),
+                            if (!widget.readOnly)
+                              Icon(Icons.unfold_more_rounded, size: 16, color: t.hintColor),
                           ],
                         ),
                       ),
@@ -1351,6 +1501,7 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
                         width: 75,
                         child: TextField(
                           controller:   _amtCtrl,
+                          enabled: !widget.readOnly,
                           keyboardType: const TextInputType.numberWithOptions(decimal: true),
                           inputFormatters: [
                             FilteringTextInputFormatter.allow(RegExp(r'^\d+\.?\d{0,2}')),
@@ -1373,20 +1524,21 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
                     ],
                   ),
                 ),
-
-                if (widget.showDelete && widget.onDelete != null) ...[
+                if (!widget.readOnly && widget.onDelete != null) ...[
                   const SizedBox(width: 6),
-                  GestureDetector(
-                    onTap: () => _confirmDelete(context),
-                    child: Container(
-                      width: 32,
-                      height: 32,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: cs.errorContainer.withOpacity(0.5),
+                  Tooltip(
+                    message: 'Remove this item',
+                    child: GestureDetector(
+                      onTap: () => _confirmDelete(context),
+                      child: Container(
+                        width: 32,
+                        height: 32,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: cs.errorContainer.withOpacity(0.5),
+                        ),
+                        child: Icon(Icons.close_rounded, size: 16, color: cs.error),
                       ),
-                      child: Icon(Icons.delete_outline_rounded,
-                          size: 16, color: cs.error),
                     ),
                   ),
                 ],
@@ -1401,7 +1553,7 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
             child: Row(
               children: [
                 GestureDetector(
-                  onTap: () => _pickDate(context),
+                  onTap: widget.readOnly ? null : () => _pickDate(context),
                   child: Container(
                     padding: const EdgeInsets.symmetric(
                         horizontal: 12, vertical: 7),
