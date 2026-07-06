@@ -1160,23 +1160,27 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
                           // What the user sees before clicking
 child: Container(
   padding: const EdgeInsets.symmetric(
-    horizontal: 10,
-    vertical: 8,
+    horizontal: 12,
+    vertical: 9,
   ),
   decoration: BoxDecoration(
-    color: cs.primaryContainer.withOpacity(0.6),
+    color: cs.primaryContainer.withOpacity(0.65),
     borderRadius: BorderRadius.circular(20),
+    border: Border.all(
+      color: cs.primary.withOpacity(0.15),
+      width: 1,
+    ),
   ),
   child: Row(
-    mainAxisSize: MainAxisSize.min,
     children: [
       Icon(
         catIcon,
-        size: 16,
+        size: 18,
         color: cs.onPrimaryContainer,
       ),
-      const SizedBox(width: 6),
-      Expanded(
+      const SizedBox(width: 8),
+
+      Flexible(
         child: Text(
           validCat
               .split('_')
@@ -1193,7 +1197,9 @@ child: Container(
           ),
         ),
       ),
-      const SizedBox(width: 2),
+
+      const SizedBox(width: 4),
+
       Icon(
         Icons.keyboard_arrow_down_rounded,
         size: 18,
