@@ -131,31 +131,30 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
     }
   }
 
-  /// BUG FIX: the original code hardcoded `localeId: 'ms_MY'`. If a device
-  /// doesn't ship the Malay speech model (very common — many Android
-  /// devices only have en_US / en_GB installed), `listen()` either silently
-  /// fails or throws a platform error every single time, which looked like
-  /// "voice input is broken" to the user. We now check what's actually
-  /// installed and pick the best match instead of assuming.
+  /// Kept hardcoded to Malay as requested. The one safety net we keep from
+  /// the earlier bug fix: if this exact locale genuinely isn't installed on
+  /// the device, we fall back to the system default instead of letting every
+  /// `listen()` call throw/silently fail — that silent failure is what
+  /// actually caused the original "mic doesn't work" behavior.
   Future<void> _resolveLocale() async {
+    const hardcoded = 'ms_MY';
     try {
       final locales = await _speech.locales();
-      final hasMalay = locales.any((l) => l.localeId.toLowerCase().startsWith('ms'));
-      if (hasMalay) {
-        _localeId = locales
-            .firstWhere((l) => l.localeId.toLowerCase().startsWith('ms'))
-            .localeId;
+      final available = locales.any((l) => l.localeId == hardcoded);
+      if (available) {
+        _localeId = hardcoded;
         _localeIsMalay = true;
       } else {
-        // Fall back to the device's own recognizer default instead of a
-        // second hardcoded guess — this is far more reliable across devices.
         final system = await _speech.systemLocale();
         _localeId = system?.localeId;
         _localeIsMalay = false;
       }
     } catch (_) {
-      _localeId = null; // let the plugin pick its own default
-      _localeIsMalay = false;
+      // If we can't even query locales, still try the hardcoded value —
+      // some plugin versions/platforms don't support locales() reliably
+      // but listen() with it works fine.
+      _localeId = hardcoded;
+      _localeIsMalay = true;
     }
   }
 
