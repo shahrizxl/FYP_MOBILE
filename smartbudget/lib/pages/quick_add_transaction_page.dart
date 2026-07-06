@@ -63,11 +63,6 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
   int     _retryCount     = 0;
   static const int _maxRetries = 2;
 
-  // Locale actually used for recognition. We no longer hardcode 'ms_MY' —
-  // we verify it exists on-device first, and otherwise fall back gracefully.
-  String? _localeId;
-  bool    _localeIsMalay = false;
-
   // Pulse animation so listening state is obvious even to a first-time user.
   late final AnimationController _pulseCtrl = AnimationController(
     vsync: this,
@@ -116,10 +111,6 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
       _speechReady = false;
     }
 
-    if (_speechReady) {
-      await _resolveLocale();
-    }
-
     if (!mounted) return;
 
     if (!_speechReady) {
@@ -128,33 +119,6 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
       });
     } else {
       setState(() {});
-    }
-  }
-
-  /// Kept hardcoded to Malay as requested. The one safety net we keep from
-  /// the earlier bug fix: if this exact locale genuinely isn't installed on
-  /// the device, we fall back to the system default instead of letting every
-  /// `listen()` call throw/silently fail — that silent failure is what
-  /// actually caused the original "mic doesn't work" behavior.
-  Future<void> _resolveLocale() async {
-    const hardcoded = 'ms_MY';
-    try {
-      final locales = await _speech.locales();
-      final available = locales.any((l) => l.localeId == hardcoded);
-      if (available) {
-        _localeId = hardcoded;
-        _localeIsMalay = true;
-      } else {
-        final system = await _speech.systemLocale();
-        _localeId = system?.localeId;
-        _localeIsMalay = false;
-      }
-    } catch (_) {
-      // If we can't even query locales, still try the hardcoded value —
-      // some plugin versions/platforms don't support locales() reliably
-      // but listen() with it works fine.
-      _localeId = hardcoded;
-      _localeIsMalay = true;
     }
   }
 
@@ -270,7 +234,7 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
         ),
         listenFor: const Duration(seconds: 30),
         pauseFor: const Duration(seconds: 3),
-        localeId: _localeId,
+        localeId: 'ms_MY', // 🔥 Set to Malay (Malaysia)
       );
     } catch (e) {
       // BUG FIX: listen() can throw synchronously (e.g. bad locale id) —
@@ -1450,20 +1414,18 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
                         child: Row(
                           children: [
                             Expanded(
-                              child: Align(
-                                alignment: Alignment.centerLeft,
-                                child: FittedBox(
-                                  fit: BoxFit.scaleDown,
-                                  child: Text(
-                                    validCat.split('_')
-                                        .map((w) => w.isNotEmpty ? '${w[0].toUpperCase()}${w.substring(1)}' : '')
-                                        .join(' '),
-                                    style: TextStyle(
-                                        color:      cs.onSurfaceVariant,
-                                        fontWeight: FontWeight.w600,
-                                        fontSize:   12.5,
-                                        letterSpacing: 0.5),
-                                  ),
+                              child: Text(
+                                validCat.split('_')
+                                    .map((w) => w.isNotEmpty
+                                        ? '${w[0].toUpperCase()}${w.substring(1)}'
+                                        : '')
+                                    .join(' '),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: cs.onSurfaceVariant,
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 15, // or 16
                                 ),
                               ),
                             ),
