@@ -1111,15 +1111,7 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
-                    Container(
-                      width: 36, height: 36,
-                      decoration: BoxDecoration(
-                        color:        cs.surfaceContainerHighest,
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: cs.outlineVariant.withOpacity(0.5), width: 0.5),
-                      ),
-                      child: Icon(catIcon, color: cs.onSurfaceVariant, size: 16),
-                    ),
+
                     const SizedBox(width: 8),
 
                     // ── POPUP MENU BUTTON ──
@@ -1166,34 +1158,50 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
                             );
                           }).toList(),
                           // What the user sees before clicking
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(vertical: 8),
-                            color: Colors.transparent, 
-                            child: Row(
-                              children: [
-                                Expanded(
-                                  child: Align(
-                                    alignment: Alignment.centerLeft,
-                                    child: FittedBox(
-                                      fit: BoxFit.scaleDown,
-                                      child: Text(
-                                        validCat.split('_')
-                                            .map((w) => w.isNotEmpty ? '${w[0].toUpperCase()}${w.substring(1)}' : '')
-                                            .join(' '),
-                                        style: TextStyle(
-                                            color:      cs.onSurfaceVariant,
-                                            fontWeight: FontWeight.w600,
-                                            fontSize:   12.5,
-                                            letterSpacing: 0.5),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(width: 4),
-                                Icon(Icons.unfold_more_rounded, size: 16, color: t.hintColor),
-                              ],
-                            ),
-                          ),
+child: Container(
+  padding: const EdgeInsets.symmetric(
+    horizontal: 10,
+    vertical: 8,
+  ),
+  decoration: BoxDecoration(
+    color: cs.primaryContainer.withOpacity(0.6),
+    borderRadius: BorderRadius.circular(20),
+  ),
+  child: Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Icon(
+        catIcon,
+        size: 16,
+        color: cs.onPrimaryContainer,
+      ),
+      const SizedBox(width: 6),
+      Expanded(
+        child: Text(
+          validCat
+              .split('_')
+              .map((w) => w.isNotEmpty
+                  ? '${w[0].toUpperCase()}${w.substring(1)}'
+                  : '')
+              .join(' '),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            color: cs.onPrimaryContainer,
+            fontWeight: FontWeight.w600,
+            fontSize: 14,
+          ),
+        ),
+      ),
+      const SizedBox(width: 2),
+      Icon(
+        Icons.keyboard_arrow_down_rounded,
+        size: 18,
+        color: cs.onPrimaryContainer,
+      ),
+    ],
+  ),
+),
                         ),
                       ),
                     ),
