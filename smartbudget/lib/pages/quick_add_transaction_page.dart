@@ -1338,7 +1338,9 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
     final validCat = widget.categoryIcons.containsKey(_selectedCat)
         ? _selectedCat : 'other';
 
-    return Container(
+    return Stack(
+  children: [
+    Container(
       margin: const EdgeInsets.only(top: 10),
       decoration: BoxDecoration(
         color:        cs.surfaceContainerLowest,
@@ -1348,21 +1350,11 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
       child: Column(
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
+            padding: const EdgeInsets.fromLTRB(16, 16, 56, 12),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                Container(
-                  width: 36, height: 36,
-                  decoration: BoxDecoration(
-                    color:        cs.surfaceContainerHighest,
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(color: cs.outlineVariant.withOpacity(0.5), width: 0.5),
-                  ),
-                  child: Icon(catIcon, color: cs.onSurfaceVariant, size: 16),
-                ),
-                const SizedBox(width: 8),
-
+                
                 // ── POPUP MENU BUTTON ──
                 Expanded(
                   child: Theme(
@@ -1412,9 +1404,17 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
                         color: Colors.transparent,
                         child: Row(
                           children: [
+                            Icon(
+                              catIcon,
+                              size: 18,
+                              color: cs.primary,
+                            ),
+                            const SizedBox(width: 8),
+
                             Expanded(
                               child: Text(
-                                validCat.split('_')
+                                validCat
+                                    .split('_')
                                     .map((w) => w.isNotEmpty
                                         ? '${w[0].toUpperCase()}${w.substring(1)}'
                                         : '')
@@ -1424,13 +1424,19 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
                                 style: TextStyle(
                                   color: cs.onSurfaceVariant,
                                   fontWeight: FontWeight.w600,
-                                  fontSize: 15, // or 16
+                                  fontSize: 15,
                                 ),
                               ),
                             ),
-                            const SizedBox(width: 4),
-                            if (!widget.readOnly)
-                              Icon(Icons.unfold_more_rounded, size: 16, color: t.hintColor),
+
+                            if (!widget.readOnly) ...[
+                              const SizedBox(width: 4),
+                              Icon(
+                                Icons.keyboard_arrow_down_rounded,
+                                size: 18,
+                                color: t.hintColor,
+                              ),
+                            ],
                           ],
                         ),
                       ),
@@ -1484,24 +1490,6 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
                     ],
                   ),
                 ),
-                if (!widget.readOnly && widget.onDelete != null) ...[
-                  const SizedBox(width: 6),
-                  Tooltip(
-                    message: 'Remove this item',
-                    child: GestureDetector(
-                      onTap: () => _confirmDelete(context),
-                      child: Container(
-                        width: 32,
-                        height: 32,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: cs.errorContainer.withOpacity(0.5),
-                        ),
-                        child: Icon(Icons.close_rounded, size: 16, color: cs.error),
-                      ),
-                    ),
-                  ),
-                ],
               ],
             ),
           ),
@@ -1552,6 +1540,46 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
           ),
         ],
       ),
-    );
+    ),
+
+    if (!widget.readOnly && widget.onDelete != null)
+      Positioned(
+        top: 6,
+        right: 6,
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(18),
+            onTap: () => _confirmDelete(context),
+           child: ClipRRect(
+  borderRadius: BorderRadius.circular(18),
+  child: BackdropFilter(
+      filter: ImageFilter.blur(
+        sigmaX: 12,
+        sigmaY: 12,
+      ),
+      child: Container(
+        width: 34,
+        height: 34,
+        decoration: BoxDecoration(
+          color: cs.surface.withOpacity(0.55),
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(
+            color: cs.outlineVariant.withOpacity(0.35),
+          ),
+        ),
+        child: Icon(
+          Icons.delete_outline_rounded,
+          size: 18,
+          color: cs.error,
+        ),
+      ),
+    ),
+  ),
+          ),
+        ),
+      ),
+  ],
+);
   }
 }
