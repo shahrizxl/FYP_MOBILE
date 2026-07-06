@@ -234,7 +234,6 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
         ),
         listenFor: const Duration(seconds: 30),
         pauseFor: const Duration(seconds: 3),
-        localeId: 'ms_MY', // 🔥 Set to Malay (Malaysia)
       );
     } catch (e) {
       // BUG FIX: listen() can throw synchronously (e.g. bad locale id) —
