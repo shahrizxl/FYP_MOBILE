@@ -54,25 +54,13 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
   int                 _nextId     = 1;
   final _scrollCtrl = ScrollController();
 
-  // ── Speech state ─────────────────────────────────────────────────────────
+  // Speech
   final stt.SpeechToText _speech = stt.SpeechToText();
-  bool    _speechReady    = false;
-  bool    _speechDenied   = false; // permanently denied (permission)
-  bool    _isListening    = false;
-  String  _preSpeechText  = '';
-  int     _retryCount     = 0;
+  bool    _speechReady   = false;
+  bool    _isListening   = false;
+  String  _preSpeechText = '';
+  int     _retryCount    = 0;
   static const int _maxRetries = 2;
-
-  // Pulse animation so listening state is obvious even to a first-time user.
-  late final AnimationController _pulseCtrl = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 1200),
-  )..repeat(reverse: true);
-
-  // Safety-net: if the plugin's onStatus/onResult callbacks never fire
-  // (this happens on some Android OEM skins), we don't want the mic to look
-  // "stuck" listening forever.
-  Timer? _listeningWatchdog;
 
   final Map<String, IconData> categoryIcons = {
     'food'         : Icons.restaurant_rounded,
@@ -105,19 +93,14 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
       _speechReady = await _speech.initialize(
         onError: _onSpeechError,
         onStatus: _onSpeechStatus,
-        // debugLogging: false, // flip on locally if you need to diagnose OEM issues
       );
     } catch (e) {
       _speechReady = false;
     }
 
-    if (!mounted) return;
-
-    if (!_speechReady) {
-      setState(() {
-        error = 'Microphone not available on this device. You can still type.';
-      });
-    } else {
+    if (!_speechReady && mounted) {
+      setState(() => error = 'Microphone permission denied. Enable it in Settings.');
+    } else if (mounted) {
       setState(() {});
     }
   }
@@ -125,25 +108,19 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
   void _onSpeechStatus(String status) {
     if (!mounted) return;
     if (status == 'done' || status == 'notListening') {
-      _clearWatchdog();
       setState(() => _isListening = false);
     }
   }
 
   void _onSpeechError(dynamic errorNotification) {
     if (!mounted) return;
-    _clearWatchdog();
 
-    final errorMsg = (errorNotification?.errorMsg ?? errorNotification.toString()).toString();
-    // BUG FIX: `errorNotification.permanent` exists on SpeechRecognitionError
-    // and tells us whether retrying will ever succeed (e.g. permission
-    // permanently denied). The original code ignored this and could retry
-    // forever against an error that will never clear.
-    final bool permanent = (errorNotification?.permanent as bool?) ?? false;
+    final errorMsg = errorNotification.errorMsg ?? errorNotification.toString();
 
     const ignoredErrors = [
       'error_speech_timeout',
       'error_no_match',
+      'error_audio',
     ];
 
     if (ignoredErrors.any((e) => errorMsg.contains(e))) {
@@ -153,64 +130,23 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
 
     setState(() => _isListening = false);
 
-    if (errorMsg.contains('error_audio')) {
-      // Real device/mic problem — don't silently swallow it like before.
-      HapticFeedback.mediumImpact();
-      setState(() => error = "Couldn't access the microphone. Check another app isn't using it.");
-      return;
-    }
-
-    if (errorMsg.contains('permission') || errorMsg.contains('error_insufficient_permissions')) {
-      _speechDenied = true;
-      setState(() => error = 'Microphone permission is off. Enable it in Settings to use voice input.');
-      return;
-    }
-
-    if (!permanent &&
-        _retryCount < _maxRetries &&
-        (errorMsg.contains('error_network') || errorMsg.contains('error_recognizer_busy'))) {
+    if (_retryCount < _maxRetries &&
+        (errorMsg.contains('error_network') ||
+         errorMsg.contains('error_recognizer_busy'))) {
       _retryCount++;
       Future.delayed(const Duration(milliseconds: 500), _startListening);
       return;
     }
 
     _retryCount = 0;
-    HapticFeedback.mediumImpact();
-    setState(() => error = 'Voice input failed. Please try again, or type instead.');
-  }
-
-  void _armWatchdog() {
-    _clearWatchdog();
-    // If nothing happens for 35s (longer than our 30s listenFor), force-reset
-    // the UI so the mic button never appears stuck.
-    _listeningWatchdog = Timer(const Duration(seconds: 35), () {
-      if (!mounted) return;
-      if (_isListening) {
-        setState(() => _isListening = false);
-      }
-    });
-  }
-
-  void _clearWatchdog() {
-    _listeningWatchdog?.cancel();
-    _listeningWatchdog = null;
+    setState(() => error = 'Voice input failed. Please try again.');
   }
 
   // ── Start Listening ────────────────────────────────────────────────────────
   Future<void> _startListening() async {
-    if (_speechDenied) {
-      setState(() => error = 'Microphone permission is off. Enable it in Settings to use voice input.');
-      return;
-    }
     if (!_speechReady) {
-      // BUG FIX: retry initialize once here instead of just failing forever —
-      // covers the case where the user granted permission *after* the page
-      // first loaded (e.g. came back from Settings).
-      await _initSpeech();
-      if (!_speechReady) {
-        setState(() => error = 'Microphone not available.');
-        return;
-      }
+      setState(() => error = 'Microphone not available.');
+      return;
     }
 
     if (_speech.isListening) {
@@ -218,40 +154,22 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
     }
 
     _preSpeechText = ctrl.text.trim();
-    setState(() {
-      _isListening = true;
-      error = null;
-    });
-    _armWatchdog();
+    setState(() { _isListening = true; error = null; });
 
-    try {
-      await _speech.listen(
-        onResult: _onSpeechResult,
-        listenOptions: stt.SpeechListenOptions(
-          listenMode: stt.ListenMode.dictation,
-          partialResults: true,
-          cancelOnError: false,
-        ),
-        listenFor: const Duration(seconds: 30),
-        pauseFor: const Duration(seconds: 3),
-      );
-    } catch (e) {
-      // BUG FIX: listen() can throw synchronously (e.g. bad locale id) —
-      // the original code had no try/catch here at all, so this would crash
-      // the button into a permanently "listening" state with no way out.
-      _clearWatchdog();
-      if (!mounted) return;
-      setState(() {
-        _isListening = false;
-        error = 'Voice input failed to start. Please try again.';
-      });
-    }
+    await _speech.listen(
+      listenMode:     stt.ListenMode.dictation,
+      partialResults: true,
+      listenFor:      const Duration(seconds: 30),
+      pauseFor:       const Duration(seconds: 3),
+      onResult:       _onSpeechResult,
+      localeId:       'ms_MY', // 🔥 Set to Malay (Malaysia)
+    );
   }
 
   void _onSpeechResult(dynamic result) {
     if (!mounted) return;
 
-    final spoken = (result.recognizedWords as String? ?? '').trim();
+    final spoken = (result.recognizedWords as String).trim();
     if (spoken.isEmpty) return;
 
     final base    = _preSpeechText.isEmpty ? '' : '${_preSpeechText.trimRight()} ';
@@ -269,7 +187,6 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
 
   // ── Stop Listening ─────────────────────────────────────────────────────────
   Future<void> _stopListening() async {
-    _clearWatchdog();
     if (_speech.isListening) {
       await _speech.stop();
     }
@@ -290,8 +207,6 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
 
   @override
   void dispose() {
-    _clearWatchdog();
-    _pulseCtrl.dispose();
     _speech.cancel();
     ctrl.dispose();
     _scrollCtrl.dispose();
@@ -333,8 +248,8 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
         messages.add(ChatMsg(
           id: _nextId++, fromUser: false,
           text: parsed.isNotEmpty
-              ? 'Found ${parsed.length} transaction${parsed.length > 1 ? 's' : ''}. Review, edit or remove any before saving.'
-              : "Couldn't understand that. Try something like: 'Lunch RM15'.",
+              ? 'Found these transactions. Review and confirm.'
+              : "Couldn't extract that. Try: 'Lunch RM15'.",
           extracted: parsed,
         ));
       });
@@ -365,94 +280,11 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
     setState(() => extracted.removeAt(index));
   }
 
-  /// Shows a final "double check" summary before anything hits the database.
-  Future<bool> _confirmSaveDialog(List<Map<String, dynamic>> items) async {
-    double asDouble(dynamic v) {
-      if (v == null) return 0;
-      if (v is num) return v.toDouble();
-      return double.tryParse(v.toString().replaceAll(',', '')) ?? 0;
-    }
-
-    final total = items.fold<double>(0, (sum, r) => sum + asDouble(r['amount']));
-    final cs = Theme.of(context).colorScheme;
-
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-        title: const Text('Save these transactions?'),
-        content: SizedBox(
-          width: double.maxFinite,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxHeight: 260),
-                child: ListView.separated(
-                  shrinkWrap: true,
-                  itemCount: items.length,
-                  separatorBuilder: (_, __) => const Divider(height: 16),
-                  itemBuilder: (_, i) {
-                    final r = items[i];
-                    return Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            (r['description'] ?? 'Transaction').toString(),
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Text('RM${formatAmount(asDouble(r['amount']))}',
-                            style: const TextStyle(fontWeight: FontWeight.w600)),
-                      ],
-                    );
-                  },
-                ),
-              ),
-              const SizedBox(height: 12),
-              const _HairlineDialogDivider(),
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  Text('Total', style: TextStyle(color: cs.onSurfaceVariant)),
-                  const Spacer(),
-                  Text('RM${formatAmount(total)}',
-                      style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
-                ],
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Save'),
-          ),
-        ],
-      ),
-    );
-    return confirmed ?? false;
-  }
-
   Future<void> saveFromReply(
       int msgId, List<Map<String, dynamic>> extracted) async {
     final uid = userId;
-    if (uid == null) { setState(() => error = 'Session expired. Please sign in again.'); return; }
-    if (extracted.isEmpty) {
-      setState(() => error = 'Nothing left to save — all items were removed.');
-      return;
-    }
-
-    // Let the user double-check before anything is written.
-    final confirmed = await _confirmSaveDialog(extracted);
-    if (!confirmed) return;
-
+    if (uid == null) { setState(() => error = 'Session expired.'); return; }
+    if (extracted.isEmpty) return;
     setState(() { loading = true; error = null; });
 
     try {
@@ -624,7 +456,7 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
             )),
             const SizedBox(height: 14),
             Text(
-              'Speak or type naturally in English or Malay.\nTap a suggestion below to try it out.',
+              'Speak or type naturally in English or Malay.\nWe understand how you talk.',
               textAlign: TextAlign.center,
               style: TextStyle(color: cs.onSurfaceVariant, fontSize: 14),
             ),
@@ -636,17 +468,14 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
               children: [
                 _SuggestionPill('Nasi Lemak RM8', Icons.restaurant, onTap: () {
                   ctrl.text = 'Nasi Lemak RM8';
-                  ctrl.selection = TextSelection.collapsed(offset: ctrl.text.length);
                   setState(() {});
                 }),
                 _SuggestionPill('Minyak kereta RM50', Icons.directions_car, onTap: () {
                   ctrl.text = 'Minyak kereta RM50';
-                  ctrl.selection = TextSelection.collapsed(offset: ctrl.text.length);
                   setState(() {});
                 }),
                 _SuggestionPill('Coffee RM5', Icons.local_cafe, onTap: () {
                   ctrl.text = 'Coffee RM5';
-                  ctrl.selection = TextSelection.collapsed(offset: ctrl.text.length);
                   setState(() {});
                 }),
               ],
@@ -660,37 +489,23 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
   Widget _micButton() {
     final cs = Theme.of(context).colorScheme;
 
-    return Semantics(
-      button: true,
-      label: _isListening ? 'Stop voice input' : 'Start voice input',
-      child: Tooltip(
-        message: _isListening ? 'Tap to stop' : 'Tap to speak',
-        child: GestureDetector(
-          onTap: loading ? null : _toggleMic,
-          child: AnimatedBuilder(
-            animation: _pulseCtrl,
-            builder: (_, child) {
-              final scale = _isListening ? 1.0 + (_pulseCtrl.value * 0.12) : 1.0;
-              return Transform.scale(scale: scale, child: child);
-            },
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 250),
-              width: 48,
-              height: 48,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: _isListening ? cs.primary : cs.surfaceContainerHighest,
-                border: Border.all(
-                  color: _isListening ? cs.primary : cs.outlineVariant.withOpacity(0.5),
-                  width: 0.8,
-                ),
-              ),
-              child: Icon(
-                _isListening ? Icons.mic : Icons.mic_none,
-                color: _isListening ? cs.onPrimary : cs.onSurfaceVariant,
-              ),
-            ),
+    return GestureDetector(
+      onTap: loading ? null : _toggleMic,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 250),
+        width: 48,
+        height: 48,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: _isListening ? cs.primary : cs.surfaceContainerHighest,
+          border: Border.all(
+            color: _isListening ? cs.primary : cs.outlineVariant.withOpacity(0.5),
+            width: 0.8,
           ),
+        ),
+        child: Icon(
+          _isListening ? Icons.mic : Icons.mic_none,
+          color: _isListening ? cs.onPrimary : cs.onSurfaceVariant,
         ),
       ),
     );
@@ -704,7 +519,7 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
 
     return Container(
       decoration: BoxDecoration(
-        color: cs.surfaceContainerLowest.withOpacity(0.96),
+        color: cs.surfaceContainerLowest.withOpacity(0.96), // Removed Blur for Performance
         border: Border(top: BorderSide(color: cs.outlineVariant.withOpacity(0.5), width: 0.5)),
       ),
       child: SafeArea(
@@ -741,7 +556,7 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
                         fontSize:   15,
                         color:      cs.onSurface,
                         fontWeight: FontWeight.w400,
-                        height:     1.45),
+                        height:     1.45), 
                     decoration: InputDecoration(
                       hintText: _isListening
                           ? 'Mendengar...'
@@ -749,7 +564,7 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
                       hintStyle: TextStyle(
                           color:      t.hintColor,
                           fontSize:   15,
-                          fontWeight: FontWeight.w400),
+                          fontWeight: FontWeight.w400), 
                       border:         InputBorder.none,
                       contentPadding: const EdgeInsets.symmetric(
                           horizontal: 20, vertical: 14),
@@ -758,38 +573,34 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
                 ),
               ),
               const SizedBox(width: 8),
-              Semantics(
-                button: true,
-                label: 'Send',
-                child: GestureDetector(
-                  onTap: (loading || !hasText) ? null : sendMessage,
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 250),
-                    curve:    Curves.easeOutBack,
-                    width:    48,
-                    height:   48,
-                    margin:   const EdgeInsets.only(bottom: 2),
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: hasText ? cs.primary : Colors.transparent,
-                      border: Border.all(
-                        color: hasText ? Colors.transparent : cs.outlineVariant.withOpacity(0.5),
-                        width: 0.8,
-                      ),
+              GestureDetector(
+                onTap: (loading || !hasText) ? null : sendMessage,
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 250),
+                  curve:    Curves.easeOutBack,
+                  width:    48,
+                  height:   48,
+                  margin:   const EdgeInsets.only(bottom: 2),
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: hasText ? cs.primary : Colors.transparent,
+                    border: Border.all(
+                      color: hasText ? Colors.transparent : cs.outlineVariant.withOpacity(0.5),
+                      width: 0.8,
                     ),
-                    child: Center(
-                      child: loading
-                          ? SizedBox(
-                              width:  18,
-                              height: 18,
-                              child: CircularProgressIndicator(
-                                  strokeWidth: 1.5,
-                                  color: cs.onSurfaceVariant.withOpacity(0.5)),
-                            )
-                          : Icon(Icons.arrow_upward_rounded,
-                              size:  20,
-                              color: hasText ? cs.onPrimary : t.hintColor),
-                    ),
+                  ),
+                  child: Center(
+                    child: loading
+                        ? SizedBox(
+                            width:  18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                                strokeWidth: 1.5,
+                                color: cs.onSurfaceVariant.withOpacity(0.5)),
+                          )
+                        : Icon(Icons.arrow_upward_rounded,
+                            size:  20,
+                            color: hasText ? cs.onPrimary : t.hintColor),
                   ),
                 ),
               ),
@@ -804,9 +615,7 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
     final cs = Theme.of(context).colorScheme;
     final label = _isListening
         ? 'Listening'
-        : (_speechDenied
-            ? 'Mic Off'
-            : (_speechReady ? 'Voice Ready' : 'Text Only'));
+        : (_speechReady ? 'Voice Ready' : 'Text Only');
     final dotAlpha = _isListening ? 1.0 : (_speechReady ? 0.55 : 0.22);
 
     return Row(mainAxisSize: MainAxisSize.min, children: [
@@ -824,7 +633,7 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
               fontSize: 10.5,
               color:    cs.onSurfaceVariant,
               fontWeight: FontWeight.w400,
-              letterSpacing: 0.3)),
+              letterSpacing: 0.3)), 
     ]);
   }
 
@@ -833,11 +642,11 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
     final cs = Theme.of(context).colorScheme;
 
     return Scaffold(
-      resizeToAvoidBottomInset: true,
+      resizeToAvoidBottomInset: true, 
       backgroundColor: cs.surfaceContainerLowest,
       extendBodyBehindAppBar: true,
       appBar: AppBar(
-        backgroundColor: cs.surfaceContainerLowest.withOpacity(0.90),
+        backgroundColor: cs.surfaceContainerLowest.withOpacity(0.90), // Removed Blur
         elevation: 0,
         shape: Border(
           bottom: BorderSide(color: cs.outlineVariant.withOpacity(0.5), width: 0.5)
@@ -855,7 +664,7 @@ class _QuickAddTransactionPageState extends State<QuickAddTransactionPage>
                     fontSize:   16,
                     fontWeight: FontWeight.w600,
                     color:      cs.onSurface,
-                    letterSpacing: 0.1)),
+                    letterSpacing: 0.1)), 
             const SizedBox(height: 2),
             _statusRow(),
           ],
@@ -941,7 +750,7 @@ class _TypingDotsState extends State<_TypingDots>
                   fontSize: 13,
                   color:    cs.onSurfaceVariant,
                   fontWeight: FontWeight.w400,
-                  letterSpacing: 0.2)),
+                  letterSpacing: 0.2)), 
           const SizedBox(width: 7),
           ...List.generate(3, (i) {
             final phase   = i / 3;
@@ -992,7 +801,7 @@ class _UserBubble extends StatelessWidget {
               fontSize:   15,
               color:      cs.onPrimary,
               fontWeight: FontWeight.w500,
-              height:     1.5)),
+              height:     1.5)), 
     );
   }
 }
@@ -1024,8 +833,6 @@ class _AiBubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final wasCleared = extracted != null && extracted!.isEmpty && !alreadySaved;
-
     return Container(
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
@@ -1043,14 +850,14 @@ class _AiBubble extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(children: [
-            Text('✦', style: TextStyle(color: cs.primary, fontSize: 9)),
+            Text('✦', style: TextStyle(color: cs.primary, fontSize: 9)), 
             const SizedBox(width: 7),
             Text('AI',
                 style: TextStyle(
                     fontSize:   9.5,
                     color:      cs.onSurfaceVariant,
                     fontWeight: FontWeight.w700,
-                    letterSpacing: 2.2)),
+                    letterSpacing: 2.2)), 
           ]),
           const SizedBox(height: 10),
           Text(text, style: TextStyle(
@@ -1062,27 +869,11 @@ class _AiBubble extends StatelessWidget {
           if (hasExtracted) ...[
             const SizedBox(height: 14),
             ...extracted!.asMap().entries.map((e) =>
-              Dismissible(
-                key: ValueKey(identityHashCode(e.value)),
-                direction: alreadySaved ? DismissDirection.none : DismissDirection.endToStart,
-                background: Container(
-                  margin: const EdgeInsets.only(top: 10),
-                  alignment: Alignment.centerRight,
-                  padding: const EdgeInsets.only(right: 18),
-                  decoration: BoxDecoration(
-                    color: cs.errorContainer,
-                    borderRadius: BorderRadius.circular(14),
-                  ),
-                  child: Icon(Icons.delete_outline_rounded, color: cs.onErrorContainer),
-                ),
-                onDismissed: (_) => onDeleteItem(e.key),
-                child: EditableTransactionCard(
-                  data:          e.value,
-                  categoryIcons: categoryIcons,
-                  readOnly:      alreadySaved,
-                  onChanged:     (u) => extracted![e.key] = u,
-                  onDelete:      alreadySaved ? null : () => onDeleteItem(e.key),
-                ),
+              EditableTransactionCard(
+                data:          e.value,
+                categoryIcons: categoryIcons,
+                onChanged:     (u) => extracted![e.key] = u,
+                onDelete:      alreadySaved ? null : () => onDeleteItem(e.key),
               ),
             ),
             const SizedBox(height: 16),
@@ -1090,12 +881,6 @@ class _AiBubble extends StatelessWidget {
               saved:   alreadySaved,
               loading: loading,
               onTap:   alreadySaved || loading ? null : onSave,
-            ),
-          ] else if (wasCleared) ...[
-            const SizedBox(height: 12),
-            Text(
-              'All items removed — nothing to save here.',
-              style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant, fontStyle: FontStyle.italic),
             ),
           ],
         ],
@@ -1120,44 +905,40 @@ class _ConfirmButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    return Semantics(
-      button: true,
-      label: saved ? 'Saved' : 'Confirm and save',
-      child: GestureDetector(
-        onTap: onTap,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 350),
-          height:   52,
-          decoration: BoxDecoration(
-            color: saved
-                ? Colors.transparent
-                : (onTap != null ? cs.primary : cs.surfaceContainerHighest),
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(
-              color: saved ? cs.outlineVariant : Colors.transparent,
-              width: 0.8,
-            ),
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 350),
+        height:   52,
+        decoration: BoxDecoration(
+          color: saved
+              ? Colors.transparent
+              : (onTap != null ? cs.primary : cs.surfaceContainerHighest),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: saved ? cs.outlineVariant : Colors.transparent,
+            width: 0.8,
           ),
-          child: Center(
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  saved ? Icons.check_rounded : Icons.save_alt_rounded,
-                  size:  16,
-                  color: saved ? cs.onSurfaceVariant : cs.onPrimary,
-                ),
-                const SizedBox(width: 8),
-                Text(
-                  saved ? 'Saved' : 'Confirm & Save',
-                  style: TextStyle(
-                      fontSize:   14.5,
-                      fontWeight: FontWeight.w600,
-                      color:      saved ? cs.onSurfaceVariant : cs.onPrimary,
-                      letterSpacing: 0.2),
-                ),
-              ],
-            ),
+        ),
+        child: Center(
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                saved ? Icons.check_rounded : Icons.save_alt_rounded,
+                size:  16,
+                color: saved ? cs.onSurfaceVariant : cs.onPrimary,
+              ),
+              const SizedBox(width: 8),
+              Text(
+                saved ? 'Saved' : 'Confirm & Save',
+                style: TextStyle(
+                    fontSize:   14.5,
+                    fontWeight: FontWeight.w600,
+                    color:      saved ? cs.onSurfaceVariant : cs.onPrimary,
+                    letterSpacing: 0.2), 
+              ),
+            ],
           ),
         ),
       ),
@@ -1194,7 +975,7 @@ class _SuggestionPill extends StatelessWidget {
                   fontSize:   13,
                   color:      cs.onSurfaceVariant,
                   fontWeight: FontWeight.w400,
-                  letterSpacing: 0.1)),
+                  letterSpacing: 0.1)), 
         ]),
       ),
     );
@@ -1217,13 +998,6 @@ class ChatMsg {
   });
 }
 
-class _HairlineDialogDivider extends StatelessWidget {
-  const _HairlineDialogDivider();
-  @override
-  Widget build(BuildContext context) =>
-      Container(height: 0.5, color: Theme.of(context).dividerColor.withOpacity(0.5));
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 //  EDITABLE TRANSACTION CARD
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1232,7 +1006,6 @@ class EditableTransactionCard extends StatefulWidget {
   final Map<String, IconData>          categoryIcons;
   final Function(Map<String, dynamic>) onChanged;
   final VoidCallback?                  onDelete;
-  final bool                           readOnly;
 
   const EditableTransactionCard({
     super.key,
@@ -1240,7 +1013,6 @@ class EditableTransactionCard extends StatefulWidget {
     required this.categoryIcons,
     required this.onChanged,
     this.onDelete,
-    this.readOnly = false,
   });
 
   @override
@@ -1294,7 +1066,6 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
   }
 
   Future<void> _pickDate(BuildContext context) async {
-    if (widget.readOnly) return;
     final picked = await showDatePicker(
       context:     context,
       initialDate: _selectedDate,
@@ -1305,27 +1076,6 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
       setState(() => _selectedDate = picked);
       _notify();
     }
-  }
-
-  Future<void> _confirmDelete(BuildContext context) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text('Remove this item?'),
-        content: Text(
-          '"${(widget.data['description'] ?? 'Transaction').toString()}" will be removed from this batch. It hasn\'t been saved yet, so this can\'t be undone here.',
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Cancel')),
-          FilledButton.tonal(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Remove'),
-          ),
-        ],
-      ),
-    );
-    if (ok == true) widget.onDelete?.call();
   }
 
   @override
@@ -1339,247 +1089,239 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
         ? _selectedCat : 'other';
 
     return Stack(
-  children: [
-    Container(
-      margin: const EdgeInsets.only(top: 10),
-      decoration: BoxDecoration(
-        color:        cs.surfaceContainerLowest,
-        borderRadius: BorderRadius.circular(14),
-        border:       Border.all(color: cs.outlineVariant.withOpacity(0.5), width: 0.5),
-      ),
-      child: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 16, 56, 12),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                
-                // ── POPUP MENU BUTTON ──
-                Expanded(
-                  child: Theme(
-                    data: t.copyWith(
-                      splashColor: Colors.transparent,
-                      highlightColor: Colors.transparent,
-                    ),
-                    child: PopupMenuButton<String>(
-                      enabled: !widget.readOnly,
-                      padding: EdgeInsets.zero,
-                      color: cs.surface,
-                      elevation: 8,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(16),
-                        side: BorderSide(color: cs.outlineVariant.withOpacity(0.5), width: 0.5),
+      children: [
+        Container(
+          margin: const EdgeInsets.only(top: 10),
+          decoration: BoxDecoration(
+            color:        cs.surfaceContainerLowest,
+            borderRadius: BorderRadius.circular(14),
+            border:       Border.all(color: cs.outlineVariant.withOpacity(0.5), width: 0.5),
+            boxShadow: [
+              BoxShadow(
+                color: t.shadowColor.withOpacity(0.03),
+                blurRadius: 8,
+                offset: const Offset(0, 3),
+              ),
+            ],
+          ),
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 16, 44, 12),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    Container(
+                      width: 36, height: 36,
+                      decoration: BoxDecoration(
+                        color:        cs.surfaceContainerHighest,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: cs.outlineVariant.withOpacity(0.5), width: 0.5),
                       ),
-                      constraints: const BoxConstraints(minWidth: 160, maxHeight: 260),
-                      onSelected: (val) {
-                        _selectedCat = val;
-                        _notify();
-                      },
-                      itemBuilder: (context) => widget.categoryIcons.keys.map((cat) {
-                        final displayTitle = cat.split('_')
-                            .map((w) => w.isNotEmpty ? '${w[0].toUpperCase()}${w.substring(1)}' : '')
-                            .join(' ');
-                        return PopupMenuItem<String>(
-                          value: cat,
-                          height: 44,
-                          child: Row(
-                            children: [
-                              Icon(widget.categoryIcons[cat], size: 16, color: cs.onSurfaceVariant),
-                              const SizedBox(width: 10),
-                              Text(
-                                displayTitle,
-                                style: TextStyle(
-                                    color: cs.onSurface,
-                                    fontWeight: FontWeight.w500,
-                                    fontSize: 14,
-                                    letterSpacing: 0.3),
-                              ),
-                            ],
-                          ),
-                        );
-                      }).toList(),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(vertical: 8),
-                        color: Colors.transparent,
-                        child: Row(
-                          children: [
-                            Icon(
-                              catIcon,
-                              size: 18,
-                              color: cs.primary,
-                            ),
-                            const SizedBox(width: 8),
+                      child: Icon(catIcon, color: cs.onSurfaceVariant, size: 16),
+                    ),
+                    const SizedBox(width: 8),
 
-                            Expanded(
-                              child: Text(
-                                validCat
-                                    .split('_')
-                                    .map((w) => w.isNotEmpty
-                                        ? '${w[0].toUpperCase()}${w.substring(1)}'
-                                        : '')
-                                    .join(' '),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  color: cs.onSurfaceVariant,
-                                  fontWeight: FontWeight.w600,
-                                  fontSize: 15,
+                    // ── POPUP MENU BUTTON ──
+                    Expanded(
+                      child: Theme(
+                        data: t.copyWith(
+                          splashColor: Colors.transparent,
+                          highlightColor: Colors.transparent,
+                        ),
+                        child: PopupMenuButton<String>(
+                          padding: EdgeInsets.zero,
+                          color: cs.surface,
+                          elevation: 8,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(16),
+                            side: BorderSide(color: cs.outlineVariant.withOpacity(0.5), width: 0.5),
+                          ),
+                          constraints: const BoxConstraints(minWidth: 160, maxHeight: 260),
+                          onSelected: (val) {
+                            _selectedCat = val;
+                            _notify();
+                          },
+                          itemBuilder: (context) => widget.categoryIcons.keys.map((cat) {
+                            final displayTitle = cat.split('_')
+                                .map((w) => w.isNotEmpty ? '${w[0].toUpperCase()}${w.substring(1)}' : '')
+                                .join(' ');
+                            return PopupMenuItem<String>(
+                              value: cat,
+                              height: 44,
+                              child: Row(
+                                children: [
+                                  Icon(widget.categoryIcons[cat], size: 16, color: cs.onSurfaceVariant),
+                                  const SizedBox(width: 10),
+                                  Text(
+                                    displayTitle,
+                                    style: TextStyle(
+                                        color: cs.onSurface,
+                                        fontWeight: FontWeight.w500,
+                                        fontSize: 14,
+                                        letterSpacing: 0.3),
+                                  ),
+                                ],
+                              ),
+                            );
+                          }).toList(),
+                          // What the user sees before clicking
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(vertical: 8),
+                            color: Colors.transparent, 
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: Align(
+                                    alignment: Alignment.centerLeft,
+                                    child: FittedBox(
+                                      fit: BoxFit.scaleDown,
+                                      child: Text(
+                                        validCat.split('_')
+                                            .map((w) => w.isNotEmpty ? '${w[0].toUpperCase()}${w.substring(1)}' : '')
+                                            .join(' '),
+                                        style: TextStyle(
+                                            color:      cs.onSurfaceVariant,
+                                            fontWeight: FontWeight.w600,
+                                            fontSize:   12.5,
+                                            letterSpacing: 0.5),
+                                      ),
+                                    ),
+                                  ),
                                 ),
-                              ),
+                                const SizedBox(width: 4),
+                                Icon(Icons.unfold_more_rounded, size: 16, color: t.hintColor),
+                              ],
                             ),
-
-                            if (!widget.readOnly) ...[
-                              const SizedBox(width: 4),
-                              Icon(
-                                Icons.keyboard_arrow_down_rounded,
-                                size: 18,
-                                color: t.hintColor,
-                              ),
-                            ],
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-
-                // ── AMOUNT INPUT ──
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  decoration: BoxDecoration(
-                    color:        cs.surface,
-                    borderRadius: BorderRadius.circular(10),
-                    border:       Border.all(color: cs.outlineVariant, width: 1.0),
-                  ),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.center,
-                    children: [
-                      Text('RM',
-                          style: TextStyle(
-                              fontSize:   13,
-                              color:      cs.onSurfaceVariant,
-                              fontWeight: FontWeight.w700,
-                              letterSpacing: 0.5)),
-                      const SizedBox(width: 6),
-                      SizedBox(
-                        width: 75,
-                        child: TextField(
-                          controller:   _amtCtrl,
-                          enabled: !widget.readOnly,
-                          keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                          inputFormatters: [
-                            FilteringTextInputFormatter.allow(RegExp(r'^\d+\.?\d{0,2}')),
-                          ],
-                          textAlign: TextAlign.right,
-                          onChanged:  (_) => _notify(),
-                          cursorColor:  cs.primary,
-                          style: TextStyle(
-                              fontSize:   22,
-                              fontWeight: FontWeight.w500,
-                              color:      cs.onSurface,
-                              height:     1.1),
-                          decoration: const InputDecoration(
-                            isDense:        true,
-                            contentPadding: EdgeInsets.zero,
-                            border:         InputBorder.none,
                           ),
                         ),
                       ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-
-          const _Hairline(),
-
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 10, 16, 14),
-            child: Row(
-              children: [
-                GestureDetector(
-                  onTap: widget.readOnly ? null : () => _pickDate(context),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 12, vertical: 7),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(30),
-                      border: Border.all(color: cs.outlineVariant, width: 0.8),
                     ),
-                    child: Row(mainAxisSize: MainAxisSize.min, children: [
-                      Icon(Icons.calendar_today_outlined,
-                          size: 11, color: cs.onSurfaceVariant),
-                      const SizedBox(width: 6),
-                      Text(_formatDate(_selectedDate),
-                          style: TextStyle(
-                              fontSize:   12,
-                              color:      cs.onSurfaceVariant,
-                              fontWeight: FontWeight.w500,
-                              letterSpacing: 0.2)),
-                    ]),
-                  ),
-                ),
-                const SizedBox(width: 12),
+                    const SizedBox(width: 8),
 
-                Expanded(
-                  child: Text(
-                    rawDesc,
-                    overflow:  TextOverflow.ellipsis,
-                    textAlign: TextAlign.right,
-                    style: TextStyle(
-                        fontSize:   13,
-                        color:      cs.onSurfaceVariant,
-                        fontWeight: FontWeight.w400),
+                    // ── AMOUNT INPUT ──
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      decoration: BoxDecoration(
+                        color:        cs.surface,
+                        borderRadius: BorderRadius.circular(10),
+                        border:       Border.all(color: cs.outlineVariant, width: 1.0),
+                      ),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          Text('RM',
+                              style: TextStyle(
+                                  fontSize:   13,
+                                  color:      cs.onSurfaceVariant,
+                                  fontWeight: FontWeight.w700,
+                                  letterSpacing: 0.5)),
+                          const SizedBox(width: 6),
+                          SizedBox(
+                            width: 75,
+                            child: TextField(
+                              controller:   _amtCtrl,
+                              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                              inputFormatters: [
+                                FilteringTextInputFormatter.allow(RegExp(r'^\d+\.?\d{0,2}')),
+                              ],
+                              textAlign: TextAlign.right,
+                              onChanged:  (_) => _notify(),
+                              cursorColor:  cs.primary,
+                              style: TextStyle(
+                                  fontSize:   22,
+                                  fontWeight: FontWeight.w500,
+                                  color:      cs.onSurface,
+                                  height:     1.1),
+                              decoration: const InputDecoration(
+                                isDense:        true,
+                                contentPadding: EdgeInsets.zero,
+                                border:         InputBorder.none,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+              const _Hairline(),
+
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 10, 16, 14),
+                child: Row(
+                  children: [
+                    GestureDetector(
+                      onTap: () => _pickDate(context),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 7),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(30),
+                          border: Border.all(color: cs.outlineVariant, width: 0.8),
+                        ),
+                        child: Row(mainAxisSize: MainAxisSize.min, children: [
+                          Icon(Icons.calendar_today_outlined,
+                              size: 11, color: cs.onSurfaceVariant),
+                          const SizedBox(width: 6),
+                          Text(_formatDate(_selectedDate),
+                              style: TextStyle(
+                                  fontSize:   12,
+                                  color:      cs.onSurfaceVariant,
+                                  fontWeight: FontWeight.w500,
+                                  letterSpacing: 0.2)), 
+                        ]),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+
+                    Expanded(
+                      child: Text(
+                        rawDesc,
+                        overflow:  TextOverflow.ellipsis,
+                        textAlign: TextAlign.right,
+                        style: TextStyle(
+                            fontSize:   13,
+                            color:      cs.onSurfaceVariant,
+                            fontWeight: FontWeight.w400), 
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+
+        // ── DELETE BUTTON ──
+        if (widget.onDelete != null)
+          Positioned(
+            top: 6,
+            right: 6,
+            child: Material(
+              color: Colors.transparent,
+              child: InkWell(
+                borderRadius: BorderRadius.circular(18),
+                onTap: widget.onDelete,
+                child: Container(
+                  width: 30,
+                  height: 30,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: cs.errorContainer.withOpacity(0.5),
+                  ),
+                  child: Icon(
+                    Icons.close_rounded,
+                    size: 16,
+                    color: cs.error,
                   ),
                 ),
-              ],
+              ),
             ),
           ),
-        ],
-      ),
-    ),
-
-    if (!widget.readOnly && widget.onDelete != null)
-      Positioned(
-        top: 6,
-        right: 6,
-        child: Material(
-          color: Colors.transparent,
-          child: InkWell(
-            borderRadius: BorderRadius.circular(18),
-            onTap: () => _confirmDelete(context),
-           child: ClipRRect(
-  borderRadius: BorderRadius.circular(18),
-  child: BackdropFilter(
-      filter: ImageFilter.blur(
-        sigmaX: 12,
-        sigmaY: 12,
-      ),
-      child: Container(
-        width: 34,
-        height: 34,
-        decoration: BoxDecoration(
-          color: cs.surface.withOpacity(0.55),
-          borderRadius: BorderRadius.circular(18),
-          border: Border.all(
-            color: cs.outlineVariant.withOpacity(0.35),
-          ),
-        ),
-        child: Icon(
-          Icons.delete_outline_rounded,
-          size: 18,
-          color: cs.error,
-        ),
-      ),
-    ),
-  ),
-          ),
-        ),
-      ),
-  ],
-);
+      ],
+    );
   }
 }
