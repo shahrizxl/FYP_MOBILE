@@ -1106,165 +1106,198 @@ class _EditableTransactionCardState extends State<EditableTransactionCard> {
           ),
           child: Column(
             children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 16, 44, 12),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.center,
-                  children: [
-
-                    const SizedBox(width: 8),
-
-                    // ── POPUP MENU BUTTON ──
-                    Expanded(
-                      child: Theme(
-                        data: t.copyWith(
-                          splashColor: Colors.transparent,
-                          highlightColor: Colors.transparent,
-                        ),
-                        child: PopupMenuButton<String>(
-                          padding: EdgeInsets.zero,
-                          color: cs.surface,
-                          elevation: 8,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(16),
-                            side: BorderSide(color: cs.outlineVariant.withOpacity(0.5), width: 0.5),
-                          ),
-                          constraints: const BoxConstraints(minWidth: 160, maxHeight: 260),
-                          onSelected: (val) {
-                            _selectedCat = val;
-                            _notify();
-                          },
-                          itemBuilder: (context) => widget.categoryIcons.keys.map((cat) {
-                            final displayTitle = cat.split('_')
-                                .map((w) => w.isNotEmpty ? '${w[0].toUpperCase()}${w.substring(1)}' : '')
-                                .join(' ');
-                            return PopupMenuItem<String>(
-                              value: cat,
-                              height: 44,
-                              child: Row(
-                                children: [
-                                  Icon(widget.categoryIcons[cat], size: 16, color: cs.onSurfaceVariant),
-                                  const SizedBox(width: 10),
-                                  Text(
-                                    displayTitle,
-                                    style: TextStyle(
-                                        color: cs.onSurface,
-                                        fontWeight: FontWeight.w500,
-                                        fontSize: 14,
-                                        letterSpacing: 0.3),
-                                  ),
-                                ],
-                              ),
-                            );
-                          }).toList(),
-                          // What the user sees before clicking
-child: Container(
-  padding: const EdgeInsets.symmetric(
-    horizontal: 12,
-    vertical: 9,
-  ),
-  decoration: BoxDecoration(
-    color: cs.primaryContainer.withOpacity(0.65),
-    borderRadius: BorderRadius.circular(20),
-    border: Border.all(
-      color: cs.primary.withOpacity(0.15),
-      width: 1,
-    ),
-  ),
-  child: Row(
+Padding(
+  padding: const EdgeInsets.fromLTRB(14, 8, 14, 8),
+  child: Column(
     children: [
-      Icon(
-        catIcon,
-        size: 18,
-        color: cs.onPrimaryContainer,
-      ),
-      const SizedBox(width: 8),
 
-      Flexible(
-        child: Text(
-          validCat
-              .split('_')
-              .map((w) => w.isNotEmpty
-                  ? '${w[0].toUpperCase()}${w.substring(1)}'
-                  : '')
-              .join(' '),
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: TextStyle(
-            color: cs.onPrimaryContainer,
-            fontWeight: FontWeight.w600,
-            fontSize: 14,
+      //================ HEADER ================
+      Row(
+        children: [
+
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: cs.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Icon(
+              catIcon,
+              color: cs.primary,
+              size: 20,
+            ),
           ),
+
+          const SizedBox(width: 12),
+
+          Expanded(
+            child: PopupMenuButton<String>(
+              padding: EdgeInsets.zero,
+              color: cs.surface,
+
+              constraints: const BoxConstraints(
+                minWidth: 190,
+                maxHeight: 220, // about 5 items
+              ),
+
+              onSelected: (val) {
+                _selectedCat = val;
+                _notify();
+              },
+
+              itemBuilder: (context) =>
+                  widget.categoryIcons.keys.map((cat) {
+
+                final title = cat
+                    .split('_')
+                    .map((w) =>
+                        "${w[0].toUpperCase()}${w.substring(1)}")
+                    .join(" ");
+
+                return PopupMenuItem<String>(
+                  value: cat,
+                  height: 42,
+                  child: Row(
+                    children: [
+
+                      Icon(
+                        widget.categoryIcons[cat],
+                        size: 18,
+                        color: cs.primary,
+                      ),
+
+                      const SizedBox(width: 12),
+
+                      Expanded(
+                        child: Text(
+                          title,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+
+                    ],
+                  ),
+                );
+              }).toList(),
+
+              child: Row(
+                children: [
+
+                  Expanded(
+                    child: Text(
+                      validCat
+                          .split('_')
+                          .map((w) =>
+                              "${w[0].toUpperCase()}${w.substring(1)}")
+                          .join(" "),
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+
+                  Icon(
+                    Icons.expand_more_rounded,
+                    color: cs.onSurfaceVariant,
+                  )
+
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(width: 4),
+
+          if (widget.onDelete != null)
+            IconButton(
+              splashRadius: 18,
+              visualDensity: VisualDensity.compact,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(),
+              onPressed: widget.onDelete,
+              icon: Icon(
+                Icons.close_rounded,
+                color: cs.error,
+                size: 22,
+              ),
+            ),
+
+        ],
+      ),
+
+      const SizedBox(height: 12),
+
+      //================ AMOUNT ================
+      Container(
+        constraints: const BoxConstraints(
+          minHeight: 62,
+        ),
+        padding: const EdgeInsets.symmetric(
+          horizontal: 16,
+          vertical: 8,
+        ),
+        decoration: BoxDecoration(
+          color: cs.surfaceContainerHighest.withOpacity(.35),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: cs.outlineVariant.withOpacity(.5),
+          ),
+        ),
+        child: Row(
+          children: [
+
+            Text(
+              "RM",
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.w700,
+                color: cs.onSurfaceVariant,
+              ),
+            ),
+
+            const SizedBox(width: 14),
+
+            Expanded(
+              child: TextField(
+                controller: _amtCtrl,
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
+                textAlign: TextAlign.right,
+                onChanged: (_) => _notify(),
+
+                style: TextStyle(
+                  fontSize: 30,
+                  fontWeight: FontWeight.bold,
+                  color: cs.onSurface,
+                ),
+
+                decoration: const InputDecoration(
+                  border: InputBorder.none,
+                  isDense: true,
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ),
+            ),
+
+          ],
         ),
       ),
 
-      const SizedBox(width: 4),
-
-      Icon(
-        Icons.keyboard_arrow_down_rounded,
-        size: 18,
-        color: cs.onPrimaryContainer,
-      ),
     ],
   ),
 ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-
-                    // ── AMOUNT INPUT ──
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                      decoration: BoxDecoration(
-                        color:        cs.surface,
-                        borderRadius: BorderRadius.circular(10),
-                        border:       Border.all(color: cs.outlineVariant, width: 1.0),
-                      ),
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.center,
-                        children: [
-                          Text('RM',
-                              style: TextStyle(
-                                  fontSize:   13,
-                                  color:      cs.onSurfaceVariant,
-                                  fontWeight: FontWeight.w700,
-                                  letterSpacing: 0.5)),
-                          const SizedBox(width: 6),
-                          SizedBox(
-                            width: 75,
-                            child: TextField(
-                              controller:   _amtCtrl,
-                              keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                              inputFormatters: [
-                                FilteringTextInputFormatter.allow(RegExp(r'^\d+\.?\d{0,2}')),
-                              ],
-                              textAlign: TextAlign.right,
-                              onChanged:  (_) => _notify(),
-                              cursorColor:  cs.primary,
-                              style: TextStyle(
-                                  fontSize:   22,
-                                  fontWeight: FontWeight.w500,
-                                  color:      cs.onSurface,
-                                  height:     1.1),
-                              decoration: const InputDecoration(
-                                isDense:        true,
-                                contentPadding: EdgeInsets.zero,
-                                border:         InputBorder.none,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-
               const _Hairline(),
 
               Padding(
-                padding: const EdgeInsets.fromLTRB(16, 10, 16, 14),
+                padding: const EdgeInsets.fromLTRB(14, 12, 14, 16),
                 child: Row(
                   children: [
                     GestureDetector(
@@ -1308,33 +1341,6 @@ child: Container(
             ],
           ),
         ),
-
-        // ── DELETE BUTTON ──
-        if (widget.onDelete != null)
-          Positioned(
-            top: 6,
-            right: 6,
-            child: Material(
-              color: Colors.transparent,
-              child: InkWell(
-                borderRadius: BorderRadius.circular(18),
-                onTap: widget.onDelete,
-                child: Container(
-                  width: 30,
-                  height: 30,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: cs.errorContainer.withOpacity(0.5),
-                  ),
-                  child: Icon(
-                    Icons.close_rounded,
-                    size: 16,
-                    color: cs.error,
-                  ),
-                ),
-              ),
-            ),
-          ),
       ],
     );
   }
