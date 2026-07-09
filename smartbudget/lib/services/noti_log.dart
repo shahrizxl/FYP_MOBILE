@@ -8,12 +8,11 @@ class NotificationLogService {
 
   String? get _uid => _db.auth.currentUser?.id;
 
-  /// Create ONCE per (user_id + noti_key). If exists -> updates same row (no duplicate).
   Future<void> createOnce({
     required String notiKey,
     required String title,
     required String body,
-    String type = "info", // info | warning | danger | success
+    String type = "info", 
   }) async {
     final uid = _uid;
     if (uid == null) return;
@@ -54,12 +53,11 @@ class NotificationLogService {
         .from('notifications')
         .select('id')
         .eq('user_id', uid)
-        .filter('read_at', 'is', 'null'); // IMPORTANT: 'null' AS STRING
+        .filter('read_at', 'is', 'null');
 
     return (res as List).length;
   }
 
-  /// Mark one as read (by id OR noti_key)
   Future<void> markRead({String? id, String? notiKey}) async {
     final uid = _uid;
     if (uid == null) return;
@@ -75,7 +73,6 @@ class NotificationLogService {
     await q;
   }
 
-  /// Mark all as read (only rows where read_at IS NULL)
   Future<void> markAllRead() async {
     final uid = _uid;
     if (uid == null) return;

@@ -27,7 +27,6 @@ class _AuthGateState extends State<AuthGate> {
   bool _showingRecovery = false;
   bool _loggingOut = false;
 
-  // ✅ Prevent repeated notification scheduling
   bool _notificationsScheduled = false;
 
   Future<Map<String, dynamic>?> _getProfile() async {
@@ -65,11 +64,9 @@ class _AuthGateState extends State<AuthGate> {
   void initState() {
     super.initState();
 
-    // Start deeplink handler
     _deeplinks = AuthDeeplinkHandler();
     _deeplinks.start();
 
-    // Listen for password recovery
     _sub = Supabase.instance.client.auth.onAuthStateChange.listen((data) {
       if (!mounted) return;
 
@@ -134,7 +131,6 @@ class _AuthGateState extends State<AuthGate> {
 
         // Not logged in
         if (session == null) {
-          // ✅ Reset scheduling for next login
           _notificationsScheduled = false;
 
           final msg = _lastAuthError;
@@ -202,7 +198,6 @@ class _AuthGateState extends State<AuthGate> {
               );
             }
 
-            // ✅ Schedule notifications once per login
             if (!_notificationsScheduled) {
               _notificationsScheduled = true;
 

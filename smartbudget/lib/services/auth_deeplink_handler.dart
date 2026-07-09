@@ -1,4 +1,3 @@
-// auth_deeplink_handler.dart (FULL - UPDATED)
 
 import 'dart:async';
 
@@ -11,7 +10,6 @@ class AuthDeeplinkHandler {
   StreamSubscription<Uri>? _sub;
 
   void start() {
-    // ✅ Handle app opened from a link while already running
     _sub = _appLinks.uriLinkStream.listen(
       (uri) async {
         await _handleUri(uri);
@@ -21,7 +19,6 @@ class AuthDeeplinkHandler {
       },
     );
 
-    // ✅ Handle app opened from a terminated state
     _init();
   }
 
@@ -39,7 +36,6 @@ class AuthDeeplinkHandler {
   Future<void> _handleUri(Uri uri) async {
     debugPrint("Deep link received: $uri");
 
-    // ✅ Only handle our SmartBudget reset-password link
     if (uri.scheme != "com.example.smartbudget") return;
     if (uri.host != "/reset-password") return;
 
@@ -50,11 +46,10 @@ class AuthDeeplinkHandler {
     }
 
     try {
-      // ✅ Convert ?code=... into a Supabase session (recovery session)
       await Supabase.instance.client.auth.exchangeCodeForSession(code);
-      debugPrint("✅ exchangeCodeForSession success (recovery session created).");
+      debugPrint("exchangeCodeForSession success (recovery session created).");
     } catch (e) {
-      debugPrint("❌ exchangeCodeForSession failed: $e");
+      debugPrint("exchangeCodeForSession failed: $e");
     }
   }
 

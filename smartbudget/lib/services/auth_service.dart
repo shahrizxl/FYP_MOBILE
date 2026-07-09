@@ -18,7 +18,6 @@ class AuthService {
         throw Exception("Login failed. Please try again.");
       }
 
-      // ✅ block inactive users
       await _ensureActiveAccount();
 
     } on AuthException catch (e) {
@@ -39,13 +38,11 @@ class AuthService {
         throw Exception("Signup failed. Please try again.");
       }
 
-      // ✅ if signup auto-logged in (confirmation OFF), force logout
       if (res.session != null) {
         await SupabaseConfig.client.auth.signOut();
       }
 
-      // ✅ DO NOT call _ensureActiveAccount() here
-      // user will login later, then checks happen
+    
       return;
 
     } on AuthException catch (e) {
@@ -64,7 +61,6 @@ class AuthService {
 
     Map<String, dynamic>? profile;
 
-    // ✅ retry to allow trigger to insert profiles
     for (int attempt = 0; attempt < 6; attempt++) {
       profile = await SupabaseConfig.client
           .from('profiles')
@@ -120,7 +116,6 @@ class AuthService {
       return "Too many attempts. Please wait a moment and try again.";
     }
 
-    // fallback
     return e.message;
   }
 
